@@ -1,0 +1,9 @@
+{
+  "name": "api-gate",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "boost-asio",
+    "boost-beast"
+  ],
+  "builtin-baseline": "a1cae005c39be7b18ba319fced856b68d7276271"
+}
