@@ -10,7 +10,7 @@ fi
 
 project_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 temporary_directory=$(mktemp -d)
-trap 'rm -r -- "${temporary_directory}"' EXIT
+trap 'rm -rf -- "${temporary_directory}"' EXIT
 mkdir -p "${temporary_directory}/bin" "${temporary_directory}/external-vcpkg"
 
 system_package_output=$(bash "${project_root}/scripts/install-deps.sh" \
