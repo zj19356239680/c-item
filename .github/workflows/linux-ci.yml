@@ -1,0 +1,54 @@
+name: Linux CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/.tools/vcpkg
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.cache/vcpkg/archives
+      VCPKG_DOWNLOADS: ${{ github.workspace }}/.cache/vcpkg/downloads
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        with:
+          path: .cache/vcpkg
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-
+
+      - name: Prepare cache directory
+        run: mkdir -p "${VCPKG_DEFAULT_BINARY_CACHE}"
+
+      - name: Install toolchain and dependencies
+        run: bash scripts/install-deps.sh
+
+      - name: Run quality gates
+        run: bash scripts/check.sh
+
+  container-smoke:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Build and verify container
+        run: bash scripts/container-smoke.sh
