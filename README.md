@@ -13,7 +13,7 @@ HTTP/1.1 服务：健康检查、配置校验和 JSON 日志。它**尚不能转
 ```bash
 sudo apt-get -o APT::Update::Error-Mode=any update
 sudo apt-get install -y --no-install-recommends \
-  build-essential ca-certificates clang clang-format clang-tidy cmake curl git \
+  build-essential ca-certificates clang clang-format clang-tidy cmake coreutils curl git \
   ninja-build pkg-config python3 shellcheck tar unzip zip
 ```
 

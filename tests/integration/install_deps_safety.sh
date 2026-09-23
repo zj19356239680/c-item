@@ -13,6 +13,20 @@ temporary_directory=$(mktemp -d)
 trap 'rm -r -- "${temporary_directory}"' EXIT
 mkdir -p "${temporary_directory}/bin" "${temporary_directory}/external-vcpkg"
 
+system_package_output=$(bash "${project_root}/scripts/install-deps.sh" \
+    --print-system-packages)
+expected_system_package_output=$(printf '%s\n' \
+    build-essential ca-certificates clang clang-format clang-tidy cmake coreutils \
+    curl git ninja-build pkg-config python3 shellcheck tar unzip zip)
+[[ "${system_package_output}" == "${expected_system_package_output}" ]]
+
+workflow_path="${project_root}/.github/workflows/linux-ci.yml"
+grep -Fq 'bash scripts/install-deps.sh --print-system-packages' "${workflow_path}"
+grep -Fq 'sudo apt-get -o APT::Update::Error-Mode=any update' "${workflow_path}"
+expected_ci_install="sudo apt-get install -y --no-install-recommends \"\${system_packages[@]}\""
+grep -Fq "${expected_ci_install}" "${workflow_path}"
+echo "CI consumes the installer system package list"
+
 cache_values=$(env -u VCPKG_ROOT -u APIGATE_VCPKG_ROOT -u VCPKG_DOWNLOADS \
     -u VCPKG_DEFAULT_BINARY_CACHE \
     HOME="${temporary_directory}/home" \
@@ -39,8 +53,14 @@ cat >"${temporary_directory}/bin/dpkg-query" <<'MOCK_DPKG_QUERY'
 printf '%s\n' "$*" >>"${APIGATE_TEST_DPKG_CALLS}"
 printf 'install ok installed'
 MOCK_DPKG_QUERY
-chmod +x "${temporary_directory}/bin/dpkg-query"
+cat >"${temporary_directory}/bin/sudo" <<'MOCK_SUDO'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${APIGATE_TEST_SUDO_CALLS}"
+exit 99
+MOCK_SUDO
+chmod +x "${temporary_directory}/bin/dpkg-query" "${temporary_directory}/bin/sudo"
 dpkg_calls="${temporary_directory}/dpkg-calls"
+sudo_calls="${temporary_directory}/sudo-calls"
 
 checkout="${temporary_directory}/external-vcpkg"
 git -C "${checkout}" init -q
@@ -52,6 +72,7 @@ original_branch=$(git -C "${checkout}" symbolic-ref HEAD)
 
 if PATH="${temporary_directory}/bin:${PATH}" \
    APIGATE_TEST_DPKG_CALLS="${dpkg_calls}" \
+   APIGATE_TEST_SUDO_CALLS="${sudo_calls}" \
    VCPKG_ROOT="${checkout}" \
    VCPKG_DOWNLOADS="${temporary_directory}/downloads" \
    VCPKG_DEFAULT_BINARY_CACHE="${temporary_directory}/archives" \
@@ -69,6 +90,7 @@ echo "External vcpkg checkout was left unchanged"
 
 printf '#!/usr/bin/env bash\nexit 1\n' >"${temporary_directory}/bin/dpkg-query"
 if PATH="${temporary_directory}/bin:${PATH}" \
+   APIGATE_TEST_SUDO_CALLS="${sudo_calls}" \
    VCPKG_ROOT="${checkout}" \
    VCPKG_DOWNLOADS="${temporary_directory}/downloads" \
    VCPKG_DEFAULT_BINARY_CACHE="${temporary_directory}/archives" \
@@ -78,5 +100,6 @@ if PATH="${temporary_directory}/bin:${PATH}" \
 fi
 grep -q 'sudo apt-get -o APT::Update::Error-Mode=any update' "${temporary_directory}/output"
 grep -q 'sudo apt-get install -y --no-install-recommends' "${temporary_directory}/output"
+[[ ! -s "${sudo_calls}" ]]
 [[ "$(git -C "${checkout}" rev-parse HEAD)" == "${original_commit}" ]]
-echo "Missing system packages require a separate interactive install"
+echo "Missing system packages require a separate interactive install without invoking sudo"

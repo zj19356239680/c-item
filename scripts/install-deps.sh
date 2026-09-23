@@ -1,6 +1,35 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+readonly -a system_packages=(
+    build-essential
+    ca-certificates
+    clang
+    clang-format
+    clang-tidy
+    cmake
+    coreutils
+    curl
+    git
+    ninja-build
+    pkg-config
+    python3
+    shellcheck
+    tar
+    unzip
+    zip
+)
+
+if (($# > 0)); then
+    if [[ "$1" == "--print-system-packages" ]] && (($# == 1)); then
+        printf '%s\n' "${system_packages[@]}"
+        exit 0
+    fi
+
+    echo "Usage: $0 [--print-system-packages]" >&2
+    exit 2
+fi
+
 vcpkg_root_provided=false
 if [[ -n "${VCPKG_ROOT:-}" || -n "${APIGATE_VCPKG_ROOT:-}" ]]; then
     vcpkg_root_provided=true
@@ -13,8 +42,6 @@ require_command timeout
 require_command apt-get
 require_command dpkg-query
 
-system_packages=(build-essential ca-certificates clang clang-format clang-tidy cmake curl git
-                 ninja-build pkg-config python3 shellcheck tar unzip zip)
 missing_system_packages=()
 for package in "${system_packages[@]}"; do
     package_status=$(dpkg-query -W -f='${Status}' "${package}" 2>/dev/null || true)

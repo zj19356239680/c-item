@@ -24,8 +24,28 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
+      - name: Install required system packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          package_output=$(bash scripts/install-deps.sh --print-system-packages)
+          mapfile -t system_packages <<<"${package_output}"
+          if ((${#system_packages[@]} == 0)); then
+            echo "The system package list is empty" >&2
+            exit 1
+          fi
+          for package in "${system_packages[@]}"; do
+            if [[ ! "${package}" =~ ^[a-z0-9][a-z0-9+.-]*$ ]]; then
+              echo "Invalid system package name: ${package}" >&2
+              exit 1
+            fi
+          done
+          sudo apt-get -o APT::Update::Error-Mode=any update
+          sudo apt-get install -y --no-install-recommends "${system_packages[@]}"
+
       - name: Restore vcpkg binary cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        # actions/cache v5.1.0 uses the Node.js 24 runtime.
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .cache/vcpkg
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
