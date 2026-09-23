@@ -1,3 +1,9 @@
 /build/
 /.tools/
 /vcpkg_installed/
+/.cache/
+/compile_commands.json
+/.env
+*.log
+__pycache__/
+*.pyc

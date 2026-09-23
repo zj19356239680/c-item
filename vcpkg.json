@@ -1,9 +1,27 @@
 {
   "name": "api-gate",
-  "version-string": "0.1.0",
+  "version-semver": "0.3.0",
+  "description": "C++20 API gateway foundation with a minimal asynchronous HTTP/1.1 server",
+  "builtin-baseline": "a1cae005c39be7b18ba319fced856b68d7276271",
+  "supports": "linux",
   "dependencies": [
-    "boost-asio",
-    "boost-beast"
+    {
+      "name": "boost-asio",
+      "default-features": false
+    },
+    {
+      "name": "boost-beast",
+      "default-features": false
+    },
+    "nlohmann-json",
+    "spdlog"
   ],
-  "builtin-baseline": "a1cae005c39be7b18ba319fced856b68d7276271"
+  "features": {
+    "tests": {
+      "description": "Build the ApiGate automated test suite",
+      "dependencies": [
+        "gtest"
+      ]
+    }
+  }
 }

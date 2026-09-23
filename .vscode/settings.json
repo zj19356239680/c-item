@@ -1,6 +1,0 @@
-{
-    "markdownlint.ignore": [
-        "**/.tools/**",
-        "**/build/**"
-    ]
-}

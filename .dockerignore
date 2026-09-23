@@ -1,0 +1,13 @@
+.git
+.github
+.tools
+.vscode
+build
+vcpkg_installed
+.cache
+.env*
+CMakeUserPresets.json
+compile_commands.json
+**/__pycache__
+**/*.pyc
+*.log
