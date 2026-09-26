@@ -77,4 +77,11 @@ void StructuredLogger::critical(std::string_view event, const nlohmann::json& fi
     logger_->critical("{}", make_payload(event, fields).dump());
 }
 
+void StructuredLogger::write_configuration_valid(const nlohmann::json& fields) {
+    auto result_logger = logger_->clone("apigate-configuration-check");
+    result_logger->set_level(spdlog::level::info);
+    result_logger->info("{}", make_payload("configuration_valid", fields).dump());
+    result_logger->flush();
+}
+
 }  // namespace apigate

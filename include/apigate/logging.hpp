@@ -21,6 +21,7 @@ class StructuredLogger {
     void warn(std::string_view event, const nlohmann::json& fields = {});
     void error(std::string_view event, const nlohmann::json& fields = {});
     void critical(std::string_view event, const nlohmann::json& fields = {});
+    void write_configuration_valid(const nlohmann::json& fields);
 
    private:
     [[nodiscard]] nlohmann::json make_payload(std::string_view event,

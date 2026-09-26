@@ -42,6 +42,17 @@ def assert_json_log_output(output):
     assert not invalid_logs, f"invalid structured logs: {invalid_logs!r}"
 
 
+def parse_single_json_log(output):
+    nonempty_lines = [line for line in output.splitlines() if line]
+    assert len(nonempty_lines) == 1, (
+        f"expected exactly one non-empty JSON log, got {len(nonempty_lines)}"
+    )
+    record, invalid_log = decode_json_log(1, nonempty_lines[0])
+    assert invalid_log is None, f"invalid structured log: {invalid_log!r}"
+    assert record is not None
+    return record
+
+
 class ServiceProcess:
     def __init__(self, binary, extra_env=None):
         environment = os.environ.copy()
@@ -287,6 +298,9 @@ def test_port_conflict_and_config_check(binary):
         environment = os.environ.copy()
         environment.update(
             {
+                "APIGATE_SERVICE_NAME": "config-check-test",
+                "APIGATE_ENVIRONMENT": "integration",
+                "APIGATE_LOG_LEVEL": "info",
                 "APIGATE_LISTEN_ADDRESS": "127.0.0.1",
                 "APIGATE_LISTEN_PORT": str(port),
             }
@@ -305,19 +319,55 @@ def test_port_conflict_and_config_check(binary):
         assert "http_server_start_failed" in conflict.stdout
         assert_json_log_output(conflict.stdout)
 
-        config_check = subprocess.run(
+        for log_level in ("trace", "debug", "info", "warn", "error", "critical"):
+            check_environment = environment.copy()
+            check_environment["APIGATE_LOG_LEVEL"] = log_level
+            config_check = subprocess.run(
+                [binary, "--check-config"],
+                env=check_environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                check=False,
+            )
+            assert config_check.returncode == 0
+            assert not config_check.stderr
+            assert "http_listener_started" not in config_check.stdout
+            record = parse_single_json_log(config_check.stdout)
+            assert isinstance(record.get("timestamp"), str)
+            assert record["timestamp"].endswith("Z")
+            assert record["level"] == "info"
+            payload = record["payload"]
+            assert payload["event"] == "configuration_valid"
+            assert payload["service"] == "config-check-test"
+            assert payload["environment"] == "integration"
+            assert payload["log_level"] == log_level
+            assert payload["listen_address"] == "127.0.0.1"
+            assert payload["listen_port"] == port
+
+        private_marker = "invalid-config-private-marker-20260926"
+        invalid_environment = environment.copy()
+        invalid_environment["APIGATE_SERVICE_NAME"] = private_marker + "/"
+        invalid_config = subprocess.run(
             [binary, "--check-config"],
-            env=environment,
+            env=invalid_environment,
             text=True,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             timeout=5,
             check=False,
         )
-        assert config_check.returncode == 0
-        assert "configuration_valid" in config_check.stdout
-        assert "http_listener_started" not in config_check.stdout
-        assert_json_log_output(config_check.stdout)
+        assert invalid_config.returncode != 0
+        assert not invalid_config.stdout
+        assert private_marker not in invalid_config.stderr
+        assert "http_listener_started" not in invalid_config.stderr
+        record = parse_single_json_log(invalid_config.stderr)
+        assert record["level"] == "error"
+        assert record["event"] == "bootstrap_failed"
+        assert record["category"] == "configuration"
+        assert isinstance(record.get("message"), str)
+        assert record["message"]
 
 
 def main():

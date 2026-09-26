@@ -78,7 +78,10 @@ bash scripts/run.sh --check-config
 `check.sh` 包含格式检查、clang-tidy、警告即错误、ASan/UBSan 构建和测试。
 系统工具装好后，也可运行 `bash scripts/bootstrap.sh`，它依次准备 vcpkg 依赖并执行
 `check.sh`。`run.sh --check-config` 仍会按所选预设构建程序，但程序只校验
-配置并退出，不创建监听 socket；因此它不能发现端口占用。
+配置并退出，不创建监听 socket；因此它不能发现端口占用。配置合法时，程序在标准
+输出恰好写入一条 `configuration_valid` 单行 JSON 并返回 0；该结果不受
+`APIGATE_LOG_LEVEL` 阈值影响。配置非法时，程序在标准错误输出
+`bootstrap_failed` JSON 并返回非零状态。
 
 ## 配置
 

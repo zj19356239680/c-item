@@ -74,9 +74,9 @@ int main(int argc, char* argv[]) {
         const apigate::AppConfig config = apigate::load_config_from_environment();
         apigate::StructuredLogger logger{config};
         if (command == Command::check_config) {
-            logger.info("configuration_valid", {{"log_level", apigate::to_string(config.log_level)},
-                                                {"listen_address", config.listen_address},
-                                                {"listen_port", config.listen_port}});
+            logger.write_configuration_valid({{"log_level", apigate::to_string(config.log_level)},
+                                              {"listen_address", config.listen_address},
+                                              {"listen_port", config.listen_port}});
             return EXIT_SUCCESS;
         }
 
