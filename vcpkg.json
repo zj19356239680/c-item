@@ -1,6 +1,5 @@
 {
   "name": "api-gate",
-  "version-semver": "0.3.0",
   "description": "C++20 API gateway foundation with a minimal asynchronous HTTP/1.1 server",
   "builtin-baseline": "a1cae005c39be7b18ba319fced856b68d7276271",
   "supports": "linux",

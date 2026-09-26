@@ -1,0 +1,12 @@
+#ifndef APIGATE_VERSION_HPP_
+#define APIGATE_VERSION_HPP_
+
+#include <string_view>
+
+namespace apigate {
+
+inline constexpr std::string_view version{"@PROJECT_VERSION@"};
+
+}  // namespace apigate
+
+#endif  // APIGATE_VERSION_HPP_

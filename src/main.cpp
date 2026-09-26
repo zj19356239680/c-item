@@ -9,6 +9,7 @@
 #include "apigate/application.hpp"
 #include "apigate/config.hpp"
 #include "apigate/logging.hpp"
+#include "apigate/version.hpp"
 
 namespace {
 
@@ -16,6 +17,7 @@ enum class Command : std::uint8_t {
     run,
     check_config,
     help,
+    version,
 };
 
 [[nodiscard]] Command parse_command_line(int argc, char* argv[]) {
@@ -33,11 +35,14 @@ enum class Command : std::uint8_t {
     if (argument == "--help" || argument == "-h") {
         return Command::help;
     }
+    if (argument == "--version") {
+        return Command::version;
+    }
     throw std::invalid_argument("unsupported command-line option");
 }
 
 void print_help() {
-    std::cout << "Usage: api-gate [--check-config | --help]\n"
+    std::cout << "Usage: api-gate [--check-config | --help | --version]\n"
               << "\nEnvironment variables:\n"
               << "  APIGATE_SERVICE_NAME  Service label (default: api-gate)\n"
               << "  APIGATE_ENVIRONMENT   Runtime environment (default: development)\n"
@@ -45,6 +50,8 @@ void print_help() {
               << "  APIGATE_LISTEN_ADDRESS IP address to bind (default: 127.0.0.1)\n"
               << "  APIGATE_LISTEN_PORT   TCP port, 0 selects an ephemeral port (default: 8080)\n";
 }
+
+void print_version() { std::cout << "api-gate " << apigate::version << '\n'; }
 
 void write_bootstrap_error(std::string_view category, std::string_view message) noexcept {
     try {
@@ -68,6 +75,10 @@ int main(int argc, char* argv[]) {
         const Command command = parse_command_line(argc, argv);
         if (command == Command::help) {
             print_help();
+            return EXIT_SUCCESS;
+        }
+        if (command == Command::version) {
+            print_version();
             return EXIT_SUCCESS;
         }
 

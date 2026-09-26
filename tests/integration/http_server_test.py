@@ -248,6 +248,102 @@ def test_invalid_log_detection():
         raise AssertionError("sensitive value was not detected")
 
 
+def test_command_line(binary, expected_version):
+    expected_output = f"api-gate {expected_version}\n"
+
+    version = subprocess.run(
+        [binary, "--version"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5,
+        check=False,
+    )
+    assert version.returncode == 0
+    assert version.stdout == expected_output
+    assert version.stdout.splitlines() == [f"api-gate {expected_version}"]
+    assert not version.stderr
+
+    invalid_environment = os.environ.copy()
+    invalid_environment.update(
+        {
+            "APIGATE_SERVICE_NAME": "invalid/service",
+            "APIGATE_ENVIRONMENT": "",
+            "APIGATE_LOG_LEVEL": "verbose",
+            "APIGATE_LISTEN_ADDRESS": "localhost",
+            "APIGATE_LISTEN_PORT": "65536",
+        }
+    )
+    invalid_config_version = subprocess.run(
+        [binary, "--version"],
+        env=invalid_environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5,
+        check=False,
+    )
+    assert invalid_config_version.returncode == 0
+    assert invalid_config_version.stdout == expected_output
+    assert not invalid_config_version.stderr
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        occupied_port = holder.getsockname()[1]
+        occupied_environment = os.environ.copy()
+        occupied_environment.update(
+            {
+                "APIGATE_LISTEN_ADDRESS": "127.0.0.1",
+                "APIGATE_LISTEN_PORT": str(occupied_port),
+            }
+        )
+        occupied_port_version = subprocess.run(
+            [binary, "--version"],
+            env=occupied_environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            check=False,
+        )
+        assert occupied_port_version.returncode == 0
+        assert occupied_port_version.stdout == expected_output
+        assert not occupied_port_version.stderr
+
+    help_result = subprocess.run(
+        [binary, "--help"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5,
+        check=False,
+    )
+    assert help_result.returncode == 0
+    assert "--version" in help_result.stdout
+    assert not help_result.stderr
+
+    for arguments in (
+        ["--unknown"],
+        ["--version", "extra"],
+        ["--version", "--help"],
+    ):
+        rejected = subprocess.run(
+            [binary, *arguments],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            check=False,
+        )
+        assert rejected.returncode != 0
+        assert not rejected.stdout
+        record = parse_single_json_log(rejected.stderr)
+        assert record["level"] == "error"
+        assert record["event"] == "bootstrap_failed"
+        assert record["category"] == "arguments"
+
+
 def verify_request_limit(port):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
     first_socket = None
@@ -529,10 +625,12 @@ def test_port_conflict_and_config_check(binary):
 
 
 def main():
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: http_server_test.py <api-gate-binary>")
+    if len(sys.argv) != 3:
+        raise SystemExit("usage: http_server_test.py <api-gate-binary> <expected-version>")
     binary = os.path.abspath(sys.argv[1])
+    expected_version = sys.argv[2]
     test_invalid_log_detection()
+    test_command_line(binary, expected_version)
     test_http_and_shutdown(binary)
     test_active_keep_alive_shutdown(binary)
     test_sensitive_request_data_not_logged(binary)

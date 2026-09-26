@@ -16,6 +16,12 @@ find_package(boost_beast CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 
+set(APIGATE_GENERATED_INCLUDE_DIR "${PROJECT_BINARY_DIR}/generated")
+configure_file(
+    src/version.hpp.in
+    "${APIGATE_GENERATED_INCLUDE_DIR}/apigate/version.hpp"
+    @ONLY)
+
 function(apigate_set_project_options target_name)
     target_compile_features(${target_name} PUBLIC cxx_std_20)
     set_target_properties(${target_name} PROPERTIES CXX_EXTENSIONS OFF)
@@ -51,6 +57,7 @@ target_link_libraries(apigate_core
 apigate_set_project_options(apigate_core)
 
 add_executable(api-gate src/main.cpp)
+target_include_directories(api-gate PRIVATE "${APIGATE_GENERATED_INCLUDE_DIR}")
 target_link_libraries(api-gate PRIVATE apigate_core)
 set_target_properties(api-gate PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
@@ -81,7 +88,7 @@ if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(NAME integration.http_server
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/http_server_test.py
-                $<TARGET_FILE:api-gate>)
+                $<TARGET_FILE:api-gate> ${PROJECT_VERSION})
     set_tests_properties(
         integration.config_check
         integration.service_lifecycle

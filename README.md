@@ -73,6 +73,7 @@ bash scripts/test.sh linux-debug
 bash scripts/check.sh
 bash scripts/test.sh linux-release
 bash scripts/run.sh --check-config
+bash scripts/run.sh --version
 ```
 
 `check.sh` 包含格式检查、clang-tidy、警告即错误、ASan/UBSan 构建和测试。
@@ -82,6 +83,11 @@ bash scripts/run.sh --check-config
 输出恰好写入一条 `configuration_valid` 单行 JSON 并返回 0；该结果不受
 `APIGATE_LOG_LEVEL` 阈值影响。配置非法时，程序在标准错误输出
 `bootstrap_failed` JSON 并返回非零状态。
+
+`run.sh --version` 构建程序后输出版本。程序的直接输出格式为恰好一行
+`api-gate <version>`，返回 0 且标准错误为空；版本来自 CMake 的
+`project(VERSION ...)`。该命令不读取 `APIGATE_*` 配置、不创建日志器或监听 socket，
+也不输出服务运行日志。版本输出不包含 Git SHA、构建时间或构建主机信息。
 
 ## 配置
 
