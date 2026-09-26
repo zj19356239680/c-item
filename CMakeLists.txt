@@ -69,7 +69,9 @@ if(BUILD_TESTING)
     add_executable(apigate_unit_tests
         tests/unit/config_test.cpp
         tests/unit/http_handler_test.cpp
+        tests/unit/http_server_test.cpp
         tests/unit/logging_test.cpp)
+    target_include_directories(apigate_unit_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(apigate_unit_tests PRIVATE apigate_core GTest::gtest_main)
     apigate_set_project_options(apigate_unit_tests)
     include(GoogleTest)

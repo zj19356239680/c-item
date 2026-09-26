@@ -95,6 +95,27 @@ def assert_normal_log_output(output):
     return records
 
 
+def assert_event_absent(output, event_name):
+    matching_lines = []
+    invalid_logs = []
+    for line_number, line in enumerate(output.splitlines(), start=1):
+        if not line:
+            continue
+        record, invalid_log = decode_json_log(line_number, line)
+        if invalid_log is not None:
+            invalid_logs.append(invalid_log)
+            continue
+        assert record is not None
+        payload = record.get("payload")
+        if isinstance(payload, dict) and payload.get("event") == event_name:
+            matching_lines.append(line_number)
+
+    assert not invalid_logs, f"invalid structured logs: {invalid_logs!r}"
+    assert not matching_lines, (
+        f"unexpected event {event_name!r} appeared on lines {matching_lines!r}"
+    )
+
+
 def assert_sensitive_values_absent(output, sensitive_values):
     leaked_categories = [
         category for category, value in sensitive_values.items() if value in output
@@ -462,6 +483,7 @@ def test_active_keep_alive_shutdown(binary):
         service.wait_for_event("shutdown_signal_received")
         service.wait_for_event("http_listener_stopped")
         service.wait_for_event("service_stopped")
+        assert_event_absent("".join(service.lines), "http_response_write_failed")
     finally:
         if connection is not None:
             connection.close()
@@ -520,6 +542,7 @@ def test_sensitive_request_data_not_logged(binary):
         service.wait_for_event("service_stopped")
 
         complete_output = "".join(service.lines)
+        assert_event_absent(complete_output, "http_response_write_failed")
         records = assert_normal_log_output(complete_output)
         request_events = [
             record

@@ -22,8 +22,30 @@
 #include "apigate/config.hpp"
 #include "apigate/http_handler.hpp"
 #include "apigate/logging.hpp"
+#include "http_server_internal.hpp"
 
 namespace apigate {
+
+namespace detail {
+
+HttpWriteDisposition classify_http_write_result(const boost::system::error_code& error,
+                                                bool stopping) noexcept {
+    if (stopping || error == boost::asio::error::operation_aborted) {
+        return HttpWriteDisposition::expected_cancellation;
+    }
+    if (!error) {
+        return HttpWriteDisposition::success;
+    }
+    if (error == boost::asio::error::broken_pipe ||
+        error == boost::asio::error::connection_aborted ||
+        error == boost::asio::error::connection_reset || error == boost::asio::error::eof) {
+        return HttpWriteDisposition::client_disconnected;
+    }
+    return HttpWriteDisposition::unexpected_error;
+}
+
+}  // namespace detail
+
 namespace {
 
 namespace asio = boost::asio;
@@ -175,12 +197,28 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     }
 
     void on_write(const boost::system::error_code& error, bool close_after_write) {
-        response_.reset();
-        if (error || close_after_write || stopping_) {
-            close_socket();
+        if (finished_) {
             return;
         }
-        read_request();
+        response_.reset();
+
+        switch (detail::classify_http_write_result(error, stopping_)) {
+            case detail::HttpWriteDisposition::success:
+                if (close_after_write) {
+                    close_socket();
+                } else {
+                    read_request();
+                }
+                return;
+            case detail::HttpWriteDisposition::expected_cancellation:
+            case detail::HttpWriteDisposition::client_disconnected:
+                close_socket();
+                return;
+            case detail::HttpWriteDisposition::unexpected_error:
+                logger_.error("http_response_write_failed", {{"error_code", error.value()}});
+                close_socket();
+                return;
+        }
     }
 
     void close_socket() noexcept {
