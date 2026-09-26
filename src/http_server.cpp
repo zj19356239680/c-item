@@ -79,6 +79,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         if (close_error) {
             write_fallback_diagnostic("http_session_close_failed", close_error.value());
         }
+        finish();
     }
 
    private:
@@ -98,6 +99,9 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     }
 
     void on_read(const boost::system::error_code& error) {
+        if (finished_) {
+            return;
+        }
         if (!error) {
             if (!parser_.has_value()) {
                 logger_.error("http_parser_state_invalid");
@@ -180,6 +184,9 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     }
 
     void close_socket() noexcept {
+        if (finished_) {
+            return;
+        }
         boost::system::error_code operation_error;
         const auto shutdown_error =
             stream_.socket().shutdown(tcp::socket::shutdown_send, operation_error);

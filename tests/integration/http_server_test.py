@@ -5,12 +5,21 @@ import http.client
 import json
 import os
 import queue
+import re
+import secrets
 import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timedelta
+
+
+SUPPORTED_LOG_LEVELS = {"trace", "debug", "info", "warning", "error", "critical"}
+UTC_TIMESTAMP_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
+)
 
 
 def safe_log_summary(line_number, line, reason):
@@ -33,6 +42,35 @@ def decode_json_log(line_number, line):
     return record, None
 
 
+def validate_normal_log(line_number, line):
+    record, invalid_log = decode_json_log(line_number, line)
+    if invalid_log is not None:
+        return None, invalid_log
+
+    timestamp = record.get("timestamp")
+    if not isinstance(timestamp, str) or not UTC_TIMESTAMP_PATTERN.fullmatch(timestamp):
+        return None, safe_log_summary(line_number, line, "invalid_utc_timestamp")
+    try:
+        parsed_timestamp = datetime.fromisoformat(timestamp[:-1] + "+00:00")
+    except ValueError:
+        return None, safe_log_summary(line_number, line, "invalid_utc_timestamp")
+    if parsed_timestamp.utcoffset() != timedelta(0):
+        return None, safe_log_summary(line_number, line, "invalid_utc_timestamp")
+
+    if record.get("level") not in SUPPORTED_LOG_LEVELS:
+        return None, safe_log_summary(line_number, line, "unsupported_level")
+
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None, safe_log_summary(line_number, line, "payload_not_an_object")
+    for field in ("event", "service", "environment"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not value:
+            return None, safe_log_summary(line_number, line, f"invalid_payload_{field}")
+
+    return record, None
+
+
 def assert_json_log_output(output):
     invalid_logs = []
     for line_number, line in enumerate(output.splitlines(), start=1):
@@ -40,6 +78,30 @@ def assert_json_log_output(output):
         if invalid_log is not None:
             invalid_logs.append(invalid_log)
     assert not invalid_logs, f"invalid structured logs: {invalid_logs!r}"
+
+
+def assert_normal_log_output(output):
+    records = []
+    invalid_logs = []
+    for line_number, line in enumerate(output.splitlines(), start=1):
+        if not line:
+            continue
+        record, invalid_log = validate_normal_log(line_number, line)
+        if invalid_log is not None:
+            invalid_logs.append(invalid_log)
+        else:
+            records.append(record)
+    assert not invalid_logs, f"invalid normal service logs: {invalid_logs!r}"
+    return records
+
+
+def assert_sensitive_values_absent(output, sensitive_values):
+    leaked_categories = [
+        category for category, value in sensitive_values.items() if value in output
+    ]
+    assert not leaked_categories, (
+        f"sensitive request data appeared in logs: {leaked_categories!r}"
+    )
 
 
 def parse_single_json_log(output):
@@ -83,6 +145,8 @@ class ServiceProcess:
         assert self.process.stdout is not None
         for line_number, line in enumerate(self.process.stdout, start=1):
             self.lines.append(line)
+            if not line.strip():
+                continue
             record, invalid_log = decode_json_log(line_number, line)
             if invalid_log is not None:
                 self.invalid_logs.append(invalid_log)
@@ -164,6 +228,24 @@ def test_invalid_log_detection():
         assert private_marker not in str(error)
     else:
         raise AssertionError("invalid JSON log was accepted")
+
+    _, invalid_log = validate_normal_log(8, private_marker)
+    assert invalid_log is not None
+    assert private_marker not in repr(invalid_log)
+
+    try:
+        assert_normal_log_output(private_marker)
+    except AssertionError as error:
+        assert private_marker not in str(error)
+    else:
+        raise AssertionError("invalid normal service log was accepted")
+
+    try:
+        assert_sensitive_values_absent(private_marker, {"test_category": private_marker})
+    except AssertionError as error:
+        assert private_marker not in str(error)
+    else:
+        raise AssertionError("sensitive value was not detected")
 
 
 def verify_request_limit(port):
@@ -290,6 +372,82 @@ def test_active_keep_alive_shutdown(binary):
         service.cleanup()
 
 
+def test_sensitive_request_data_not_logged(binary):
+    service = ServiceProcess(binary)
+    connection = None
+    try:
+        listener_event = service.wait_for_event("http_listener_started")
+        port = int(listener_event["port"])
+        assert 0 < port <= 65535
+
+        query_marker = "query-" + secrets.token_hex(16)
+        authorization_marker = "authorization-" + secrets.token_hex(16)
+        cookie_marker = "cookie-" + secrets.token_hex(16)
+        body_marker = "body-" + secrets.token_hex(16)
+        query_parameter = "credential=" + query_marker
+        request_body = "payload=" + body_marker
+
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        health, health_body = read_json_response(
+            connection,
+            "GET",
+            "/healthz?" + query_parameter,
+            headers={
+                "Authorization": "Bearer " + authorization_marker,
+                "Cookie": "session=" + cookie_marker,
+            },
+        )
+        assert health.status == 200
+        assert health_body["status"] == "ok"
+
+        method, method_body = read_json_response(
+            connection,
+            "POST",
+            "/healthz",
+            body=request_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert method.status == 405
+        assert method.getheader("Allow") == "GET"
+        assert method_body["error"]["code"] == "method_not_allowed"
+        active_socket = connection.sock
+        assert active_socket is not None
+
+        service.terminate()
+        assert service.process.wait(timeout=5) == 0
+        assert_peer_closed(active_socket, timeout=1)
+        connection.close()
+        connection = None
+        service.finish_log_reader()
+        service.wait_for_event("shutdown_signal_received")
+        service.wait_for_event("http_listener_stopped")
+        service.wait_for_event("service_stopped")
+
+        complete_output = "".join(service.lines)
+        records = assert_normal_log_output(complete_output)
+        request_events = [
+            record
+            for record in records
+            if record["payload"]["event"] == "http_request_completed"
+        ]
+        assert len(request_events) >= 2
+        assert_sensitive_values_absent(
+            complete_output,
+            {
+                "query_value": query_marker,
+                "complete_query_parameter": query_parameter,
+                "authorization_header": authorization_marker,
+                "cookie_header": cookie_marker,
+                "body_value": body_marker,
+                "request_body": request_body,
+            },
+        )
+    finally:
+        if connection is not None:
+            connection.close()
+        service.cleanup()
+
+
 def test_port_conflict_and_config_check(binary):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
         holder.bind(("127.0.0.1", 0))
@@ -317,7 +475,7 @@ def test_port_conflict_and_config_check(binary):
         )
         assert conflict.returncode != 0
         assert "http_server_start_failed" in conflict.stdout
-        assert_json_log_output(conflict.stdout)
+        assert_normal_log_output(conflict.stdout)
 
         for log_level in ("trace", "debug", "info", "warn", "error", "critical"):
             check_environment = environment.copy()
@@ -377,6 +535,7 @@ def main():
     test_invalid_log_detection()
     test_http_and_shutdown(binary)
     test_active_keep_alive_shutdown(binary)
+    test_sensitive_request_data_not_logged(binary)
     test_port_conflict_and_config_check(binary)
 
 
