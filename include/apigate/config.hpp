@@ -30,6 +30,8 @@ struct AppConfig {
     LogLevel log_level{LogLevel::info};
     std::string listen_address{"127.0.0.1"};
     std::uint16_t listen_port{8080};
+    std::uint16_t max_connections{256};
+    std::uint16_t max_concurrent_proxies{32};
     std::optional<UpstreamConfig> upstream;
 };
 

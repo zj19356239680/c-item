@@ -21,6 +21,8 @@ class ConfigTest : public testing::Test {
         unsetenv("APIGATE_LOG_LEVEL");
         unsetenv("APIGATE_LISTEN_ADDRESS");
         unsetenv("APIGATE_LISTEN_PORT");
+        unsetenv("APIGATE_MAX_CONNECTIONS");
+        unsetenv("APIGATE_MAX_CONCURRENT_PROXIES");
         unsetenv("APIGATE_UPSTREAM_HOST");
         unsetenv("APIGATE_UPSTREAM_PORT");
         unsetenv("APIGATE_UPSTREAM_TIMEOUT_MS");
@@ -35,7 +37,50 @@ TEST_F(ConfigTest, UsesSafeDefaults) {
     EXPECT_EQ(config.log_level, apigate::LogLevel::info);
     EXPECT_EQ(config.listen_address, "127.0.0.1");
     EXPECT_EQ(config.listen_port, 8080);
+    EXPECT_EQ(config.max_connections, 256);
+    EXPECT_EQ(config.max_concurrent_proxies, 32);
     EXPECT_FALSE(config.upstream.has_value());
+}
+
+TEST_F(ConfigTest, AcceptsCapacityLimitBoundaries) {
+    ASSERT_EQ(setenv("APIGATE_MAX_CONNECTIONS", "1", 1), 0);
+    ASSERT_EQ(setenv("APIGATE_MAX_CONCURRENT_PROXIES", "65535", 1), 0);
+
+    const auto first_config = apigate::load_config_from_environment();
+
+    EXPECT_EQ(first_config.max_connections, 1);
+    EXPECT_EQ(first_config.max_concurrent_proxies, 65535);
+
+    clear_environment();
+    ASSERT_EQ(setenv("APIGATE_MAX_CONNECTIONS", "65535", 1), 0);
+    ASSERT_EQ(setenv("APIGATE_MAX_CONCURRENT_PROXIES", "1", 1), 0);
+    const auto second_config = apigate::load_config_from_environment();
+
+    EXPECT_EQ(second_config.max_connections, 65535);
+    EXPECT_EQ(second_config.max_concurrent_proxies, 1);
+}
+
+TEST_F(ConfigTest, RejectsInvalidCapacityLimitsWithoutEchoingValues) {
+    const char* variable_names[] = {
+        "APIGATE_MAX_CONNECTIONS",
+        "APIGATE_MAX_CONCURRENT_PROXIES",
+    };
+    const char* invalid_values[] = {"0", "-1", "65536", "12suffix", ""};
+
+    for (const char* variable_name : variable_names) {
+        for (const char* invalid_value : invalid_values) {
+            clear_environment();
+            ASSERT_EQ(setenv(variable_name, invalid_value, 1), 0);
+            try {
+                static_cast<void>(apigate::load_config_from_environment());
+                FAIL() << "invalid capacity limit was accepted";
+            } catch (const apigate::ConfigError& error) {
+                if (*invalid_value != '\0') {
+                    EXPECT_EQ(std::string{error.what()}.find(invalid_value), std::string::npos);
+                }
+            }
+        }
+    }
 }
 
 TEST_F(ConfigTest, EnablesStaticUpstreamWithDefaultTimeout) {

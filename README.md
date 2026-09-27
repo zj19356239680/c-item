@@ -70,12 +70,21 @@ API 兼容承诺，具体设计边界见[设计文档](设计文档.md)。
 响应超限返回 502，任一上游阶段超时返回 504；上游 1xx 信息响应（包括 101）也会被
 拒绝为 502，不继续读取后续响应或切换协议。错误正文不会包含上游地址、请求目标或
 系统错误文本。上游响应正文上限为 1 MiB，且每个请求都新建上游连接，不自动重试。
+并发代理达到 `APIGATE_MAX_CONCURRENT_PROXIES` 时，新代理候选不会访问上游，而是
+立即返回 503 和
+`{"error":{"code":"gateway_overloaded","message":"proxy capacity is exhausted"}}`；
+响应不设置 `Retry-After`，本地健康端点不占用代理名额。
 
 代理会移除请求和响应中的标准 hop-by-hop 头以及 `Connection` 动态列出的头，覆盖
 上游 `Host`，并将下游 `Server` 保持为 `ApiGate`。`Authorization`、`Cookie` 等
 端到端请求头会转发给所配置上游，但不会写入 ApiGate 日志。客户端提供的
 `X-Forwarded-*` 不会被信任或转发，本阶段也不生成这些头。启用代理不会改变本地
 健康端点；`/readyz` 仍不主动探测上游。
+
+活动下游连接达到 `APIGATE_MAX_CONNECTIONS` 时，应用暂停发起新的 accept；已进入
+监听 backlog 的连接由操作系统排队，恢复容量后继续接收。这一背压策略不会主动向
+backlog 中的连接返回 HTTP 503，也不修改系统 backlog。两项限制约束对象数量，不是
+精确内存字节预算；默认值只是当前 MVP 的保守边界，不是生产容量或性能保证。
 
 ## 构建、测试与运行
 
@@ -114,6 +123,8 @@ bash scripts/run.sh --version
 | `APIGATE_LOG_LEVEL` | `info` | `trace`、`debug`、`info`、`warn`、`error`、`critical` |
 | `APIGATE_LISTEN_ADDRESS` | `127.0.0.1` | IPv4/IPv6 字面地址，不解析主机名 |
 | `APIGATE_LISTEN_PORT` | `8080` | 0–65535；0 由内核分配临时端口 |
+| `APIGATE_MAX_CONNECTIONS` | `256` | 1–65535；活动下游连接数上限 |
+| `APIGATE_MAX_CONCURRENT_PROXIES` | `32` | 1–65535；并发上游代理交换数上限 |
 | `APIGATE_UPSTREAM_HOST` | 未设置 | 纯 DNS 主机名、IPv4 或 IPv6 字面地址；必须与端口同时设置 |
 | `APIGATE_UPSTREAM_PORT` | 未设置 | 1–65535；必须与主机同时设置 |
 | `APIGATE_UPSTREAM_TIMEOUT_MS` | `3000`（代理启用时） | 1–60000；仅可与完整上游配置一起使用 |
@@ -132,8 +143,12 @@ APIGATE_UPSTREAM_PORT=9001 \
 bash scripts/run.sh
 ```
 
-三项上游变量均未设置时代理关闭，原有未知 GET 的 404 行为保持不变。配置检查结果只
-报告 `proxy_enabled` 和启用时的 `upstream_timeout_ms`，不会输出上游主机名。
+三项上游变量均未设置时代理关闭，原有未知 GET 的 404 行为保持不变。两项容量配置
+始终校验；代理关闭时代理并发上限不被使用。配置检查结果会报告两个数值上限、
+`proxy_enabled` 和启用时的 `upstream_timeout_ms`，不会输出上游主机名。
+
+当前没有全局字节预算、每客户端/IP 限制或请求速率限制。实际可承载数量仍受文件
+描述符、内存、CPU、上游响应大小和操作系统 backlog 等因素约束。
 
 无效配置会在监听前失败并以非零状态退出。不要将密码或令牌写入
 `.env.example`、命令行或仓库；若自行创建 `.env`，该文件已被 Git 忽略。

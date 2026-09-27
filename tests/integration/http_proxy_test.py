@@ -136,12 +136,15 @@ class ControlledUpstream:
         assert not self.thread.is_alive(), "upstream server thread did not finish"
 
 
-def proxy_environment(upstream_port, timeout_ms="1000"):
-    return {
+def proxy_environment(upstream_port, timeout_ms="1000", max_proxies=None):
+    environment = {
         "APIGATE_UPSTREAM_HOST": "127.0.0.1",
         "APIGATE_UPSTREAM_PORT": str(upstream_port),
         "APIGATE_UPSTREAM_TIMEOUT_MS": timeout_ms,
     }
+    if max_proxies is not None:
+        environment["APIGATE_MAX_CONCURRENT_PROXIES"] = str(max_proxies)
+    return environment
 
 
 def stop_service(service):
@@ -253,13 +256,18 @@ def test_proxy_failures_are_bounded_and_service_survives(binary):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as unavailable:
         unavailable.bind(("127.0.0.1", 0))
         unavailable_port = unavailable.getsockname()[1]
-        service = ServiceProcess(binary, proxy_environment(unavailable_port))
+        service = ServiceProcess(binary, proxy_environment(unavailable_port, max_proxies=1))
         try:
             port = int(service.wait_for_event("http_listener_started")["port"])
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
             failed, failed_body = read_json_response(connection, "GET", "/unavailable")
             assert failed.status == 502
             assert failed_body["error"]["code"] == "bad_gateway"
+            failed_again, failed_again_body = read_json_response(
+                connection, "GET", "/still-unavailable"
+            )
+            assert failed_again.status == 502
+            assert failed_again_body["error"]["code"] == "bad_gateway"
             health, health_body = read_json_response(connection, "GET", "/healthz")
             assert health.status == 200 and health_body["status"] == "ok"
             connection.close()
@@ -270,7 +278,7 @@ def test_proxy_failures_are_bounded_and_service_survives(binary):
 
     upstream = ControlledUpstream()
     upstream.start()
-    service = ServiceProcess(binary, proxy_environment(upstream.port, "100"))
+    service = ServiceProcess(binary, proxy_environment(upstream.port, "100", max_proxies=1))
     try:
         port = int(service.wait_for_event("http_listener_started")["port"])
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
@@ -338,11 +346,135 @@ def test_informational_responses_are_rejected(binary):
         upstream.close()
 
 
+def test_proxy_capacity_rejects_without_visiting_upstream(binary):
+    upstream = ControlledUpstream()
+    upstream.start()
+    service = ServiceProcess(binary, proxy_environment(upstream.port, max_proxies=1))
+    blocked_result = queue.Queue()
+    query_marker = "proxy-capacity-query-" + secrets.token_hex(16)
+    authorization_marker = "proxy-capacity-authorization-" + secrets.token_hex(16)
+    cookie_marker = "proxy-capacity-cookie-" + secrets.token_hex(16)
+    body_marker = "proxy-capacity-body-" + secrets.token_hex(16)
+    blocked_client = None
+    connection = None
+    try:
+        port = int(service.wait_for_event("http_listener_started")["port"])
+
+        def request_blocked():
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            try:
+                response, body = read_json_response(connection, "GET", "/blocked")
+                blocked_result.put((response.status, body))
+            except (ConnectionError, http.client.HTTPException, socket.timeout) as error:
+                blocked_result.put(error)
+            finally:
+                connection.close()
+
+        blocked_client = threading.Thread(target=request_blocked)
+        blocked_client.start()
+        assert upstream.state.block_started.wait(timeout=3)
+        assert upstream.state.request_count() == 1
+
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        rejected, rejected_body = read_json_response(
+            connection,
+            "GET",
+            "/rejected?credential=" + query_marker,
+            headers={
+                "Authorization": "Bearer " + authorization_marker,
+                "Cookie": "session=" + cookie_marker,
+            },
+        )
+        assert rejected.status == 503
+        assert rejected_body == {
+            "error": {
+                "code": "gateway_overloaded",
+                "message": "proxy capacity is exhausted",
+            }
+        }
+        assert rejected.getheader("Content-Type") == "application/json"
+        assert rejected.getheader("Cache-Control") == "no-store"
+        assert rejected.getheader("Server") == "ApiGate"
+        assert rejected.getheader("Retry-After") is None
+        assert upstream.state.request_count() == 1
+
+        health, health_body = read_json_response(connection, "GET", "/healthz")
+        assert health.status == 200 and health_body["status"] == "ok"
+        method, method_body = read_json_response(
+            connection,
+            "POST",
+            "/rejected",
+            body="payload=" + body_marker,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert method.status == 405
+        assert method_body["error"]["code"] == "method_not_allowed"
+        assert upstream.state.request_count() == 1
+
+        upstream.state.release_block.set()
+        blocked_client.join(timeout=5)
+        assert not blocked_client.is_alive(), "blocked proxy client did not finish"
+        first_result = blocked_result.get(timeout=1)
+        assert first_result == (200, {"upstream": "released"})
+
+        accepted, accepted_body = read_json_response(connection, "GET", "/accepted")
+        assert accepted.status == 201
+        assert accepted_body == {"upstream": "ok"}
+        assert upstream.state.request_count() == 2
+        connection.close()
+        connection = None
+
+        stop_service(service)
+        output = "".join(service.lines)
+        records = assert_normal_log_output(output)
+        rejected_events = [
+            record["payload"]
+            for record in records
+            if record["payload"].get("event") == "http_proxy_rejected_capacity"
+        ]
+        assert rejected_events == [
+            {
+                "event": "http_proxy_rejected_capacity",
+                "service": "api-gate",
+                "environment": "development",
+                "active_proxies": 1,
+                "max_proxies": 1,
+                "status": 503,
+            }
+        ]
+        completed_503 = [
+            record
+            for record in records
+            if record["payload"].get("event") == "http_request_completed"
+            and record["payload"].get("route") == "proxy"
+            and record["payload"].get("status") == 503
+        ]
+        assert len(completed_503) == 1
+        assert_sensitive_values_absent(
+            output,
+            {
+                "query": query_marker,
+                "authorization": authorization_marker,
+                "cookie": cookie_marker,
+                "body": body_marker,
+            },
+        )
+    finally:
+        upstream.state.release_block.set()
+        if connection is not None:
+            connection.close()
+        service.cleanup()
+        upstream.close()
+        if blocked_client is not None:
+            blocked_client.join(timeout=5)
+            assert not blocked_client.is_alive(), "blocked proxy client did not finish during cleanup"
+
+
 def test_shutdown_cancels_active_proxy_without_gateway_noise(binary):
     for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
         upstream = ControlledUpstream()
         upstream.start()
-        service = ServiceProcess(binary, proxy_environment(upstream.port, "3000"))
+        service = ServiceProcess(binary, proxy_environment(upstream.port, "3000", max_proxies=1))
         client_done = queue.Queue()
         try:
             port = int(service.wait_for_event("http_listener_started")["port"])
@@ -412,6 +544,7 @@ def main():
     test_proxy_success_and_security(binary)
     test_proxy_failures_are_bounded_and_service_survives(binary)
     test_informational_responses_are_rejected(binary)
+    test_proxy_capacity_rejects_without_visiting_upstream(binary)
     test_shutdown_cancels_active_proxy_without_gateway_noise(binary)
 
 

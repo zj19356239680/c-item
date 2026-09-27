@@ -93,6 +93,17 @@ void validate_label(std::string_view value, const char* variable_name) {
     return static_cast<std::uint16_t>(port);
 }
 
+[[nodiscard]] std::uint16_t parse_capacity_limit(std::string_view value,
+                                                 const char* variable_name) {
+    unsigned int limit = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), limit);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || limit == 0 ||
+        limit > std::numeric_limits<std::uint16_t>::max()) {
+        throw ConfigError(std::string{variable_name} + " must be an integer from 1 to 65535");
+    }
+    return static_cast<std::uint16_t>(limit);
+}
+
 [[nodiscard]] std::uint32_t parse_upstream_timeout(std::string_view value) {
     std::uint32_t timeout = 0;
     const auto result = std::from_chars(value.data(), value.data() + value.size(), timeout);
@@ -165,6 +176,13 @@ AppConfig load_config_from_environment() {
     }
     if (const auto value = read_environment("APIGATE_LISTEN_PORT")) {
         config.listen_port = parse_listen_port(*value);
+    }
+    if (const auto value = read_environment("APIGATE_MAX_CONNECTIONS")) {
+        config.max_connections = parse_capacity_limit(*value, "APIGATE_MAX_CONNECTIONS");
+    }
+    if (const auto value = read_environment("APIGATE_MAX_CONCURRENT_PROXIES")) {
+        config.max_concurrent_proxies =
+            parse_capacity_limit(*value, "APIGATE_MAX_CONCURRENT_PROXIES");
     }
 
     const auto upstream_host = read_environment("APIGATE_UPSTREAM_HOST");

@@ -26,6 +26,8 @@ APIGATE_ENVIRONMENT_VARIABLES = (
     "APIGATE_LOG_LEVEL",
     "APIGATE_LISTEN_ADDRESS",
     "APIGATE_LISTEN_PORT",
+    "APIGATE_MAX_CONNECTIONS",
+    "APIGATE_MAX_CONCURRENT_PROXIES",
     "APIGATE_UPSTREAM_HOST",
     "APIGATE_UPSTREAM_PORT",
     "APIGATE_UPSTREAM_TIMEOUT_MS",
@@ -364,6 +366,8 @@ def test_command_line(binary, expected_version):
     assert "APIGATE_UPSTREAM_HOST" in help_result.stdout
     assert "APIGATE_UPSTREAM_PORT" in help_result.stdout
     assert "APIGATE_UPSTREAM_TIMEOUT_MS" in help_result.stdout
+    assert "APIGATE_MAX_CONNECTIONS" in help_result.stdout
+    assert "APIGATE_MAX_CONCURRENT_PROXIES" in help_result.stdout
     assert not help_result.stderr
 
     for arguments in (
@@ -498,6 +502,10 @@ def test_service_environment_isolation(binary):
             },
             {"APIGATE_UPSTREAM_HOST": "incomplete.invalid"},
             {"APIGATE_UPSTREAM_PORT": "8080"},
+            {
+                "APIGATE_MAX_CONNECTIONS": "0",
+                "APIGATE_MAX_CONCURRENT_PROXIES": "65536",
+            },
         ):
             for name in APIGATE_ENVIRONMENT_VARIABLES:
                 os.environ.pop(name, None)
@@ -549,6 +557,92 @@ def test_active_keep_alive_shutdown(binary):
     finally:
         if connection is not None:
             connection.close()
+        service.cleanup()
+
+
+def test_connection_capacity_backpressure(binary):
+    service = ServiceProcess(binary, {"APIGATE_MAX_CONNECTIONS": "1"})
+    first = None
+    queued = None
+    query_marker = "capacity-query-" + secrets.token_hex(16)
+    authorization_marker = "capacity-authorization-" + secrets.token_hex(16)
+    cookie_marker = "capacity-cookie-" + secrets.token_hex(16)
+    try:
+        port = int(service.wait_for_event("http_listener_started")["port"])
+        first = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        response, body = read_json_response(first, "GET", "/healthz")
+        assert response.status == 200 and body["status"] == "ok"
+        paused = service.wait_for_event("http_accept_paused_capacity")
+        assert paused["active_connections"] == 1
+        assert paused["max_connections"] == 1
+
+        queued = socket.create_connection(("127.0.0.1", port), timeout=3)
+        queued.sendall(
+            (
+                "GET /healthz?credential="
+                + query_marker
+                + " HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer "
+                + authorization_marker
+                + "\r\nCookie: session="
+                + cookie_marker
+                + "\r\n\r\n"
+            ).encode("ascii")
+        )
+        queued.settimeout(0.25)
+        try:
+            unexpected = queued.recv(1, socket.MSG_PEEK)
+        except socket.timeout:
+            pass
+        else:
+            raise AssertionError(
+                f"backlogged connection produced an early result of length {len(unexpected)}"
+            )
+
+        first.close()
+        first = None
+        resumed = service.wait_for_event("http_accept_resumed_capacity")
+        assert resumed["active_connections"] == 0
+        assert resumed["max_connections"] == 1
+
+        queued.settimeout(3)
+        queued_response = http.client.HTTPResponse(queued)
+        queued_response.begin()
+        queued_body = json.loads(queued_response.read())
+        assert queued_response.status == 200
+        assert queued_body["status"] == "ok"
+        paused_again = service.wait_for_event("http_accept_paused_capacity")
+        assert paused_again["active_connections"] == 1
+
+        service.terminate()
+        assert service.process.wait(timeout=5) == 0
+        assert_peer_closed(queued, timeout=1)
+        service.finish_log_reader()
+        output = "".join(service.lines)
+        records = assert_normal_log_output(output)
+        transitions = [
+            record["payload"]["event"]
+            for record in records
+            if record["payload"]["event"]
+            in {"http_accept_paused_capacity", "http_accept_resumed_capacity"}
+        ]
+        assert transitions == [
+            "http_accept_paused_capacity",
+            "http_accept_resumed_capacity",
+            "http_accept_paused_capacity",
+        ]
+        assert_sensitive_values_absent(
+            output,
+            {
+                "query": query_marker,
+                "authorization": authorization_marker,
+                "cookie": cookie_marker,
+            },
+        )
+    finally:
+        if first is not None:
+            first.close()
+        if queued is not None:
+            queued.close()
         service.cleanup()
 
 
@@ -642,6 +736,8 @@ def test_port_conflict_and_config_check(binary):
                 "APIGATE_LOG_LEVEL": "info",
                 "APIGATE_LISTEN_ADDRESS": "127.0.0.1",
                 "APIGATE_LISTEN_PORT": str(port),
+                "APIGATE_MAX_CONNECTIONS": "17",
+                "APIGATE_MAX_CONCURRENT_PROXIES": "9",
             }
         )
 
@@ -684,6 +780,8 @@ def test_port_conflict_and_config_check(binary):
             assert payload["log_level"] == log_level
             assert payload["listen_address"] == "127.0.0.1"
             assert payload["listen_port"] == port
+            assert payload["max_connections"] == 17
+            assert payload["max_concurrent_proxies"] == 9
             assert payload["proxy_enabled"] is False
             assert "upstream_timeout_ms" not in payload
 
@@ -721,6 +819,7 @@ def main():
     test_service_environment_isolation(binary)
     test_http_and_shutdown(binary)
     test_active_keep_alive_shutdown(binary)
+    test_connection_capacity_backpressure(binary)
     test_sensitive_request_data_not_logged(binary)
     test_port_conflict_and_config_check(binary)
 

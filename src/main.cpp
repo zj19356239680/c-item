@@ -50,6 +50,8 @@ void print_help() {
         << "  APIGATE_LOG_LEVEL     trace|debug|info|warn|error|critical\n"
         << "  APIGATE_LISTEN_ADDRESS IP address to bind (default: 127.0.0.1)\n"
         << "  APIGATE_LISTEN_PORT   TCP port, 0 selects an ephemeral port (default: 8080)\n"
+        << "  APIGATE_MAX_CONNECTIONS Active downstream connection limit (default: 256)\n"
+        << "  APIGATE_MAX_CONCURRENT_PROXIES Concurrent upstream proxy limit (default: 32)\n"
         << "  APIGATE_UPSTREAM_HOST Optional static HTTP upstream host\n"
         << "  APIGATE_UPSTREAM_PORT Optional static HTTP upstream port (1-65535)\n"
         << "  APIGATE_UPSTREAM_TIMEOUT_MS Per-stage timeout in milliseconds (default: 3000)\n";
@@ -92,6 +94,8 @@ int main(int argc, char* argv[]) {
             nlohmann::json fields{{"log_level", apigate::to_string(config.log_level)},
                                   {"listen_address", config.listen_address},
                                   {"listen_port", config.listen_port},
+                                  {"max_connections", config.max_connections},
+                                  {"max_concurrent_proxies", config.max_concurrent_proxies},
                                   {"proxy_enabled", config.upstream.has_value()}};
             if (config.upstream) {
                 fields["upstream_timeout_ms"] = config.upstream->timeout_ms;

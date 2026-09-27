@@ -57,6 +57,96 @@ AcceptRetryDisposition classify_accept_retry_completion(const boost::system::err
     return AcceptRetryDisposition::retry;
 }
 
+AcceptCapacityState::AcceptCapacityState(std::size_t max_connections) noexcept
+    : max_connections_(max_connections) {}
+
+AcceptCapacityAction AcceptCapacityState::next_action() noexcept {
+    if (stopped_ || accept_pending_ || retry_pending_) {
+        return AcceptCapacityAction::none;
+    }
+    if (active_connections_ >= max_connections_) {
+        if (paused_) {
+            return AcceptCapacityAction::none;
+        }
+        paused_ = true;
+        return AcceptCapacityAction::pause;
+    }
+
+    accept_pending_ = true;
+    if (paused_) {
+        paused_ = false;
+        return AcceptCapacityAction::resume_and_start;
+    }
+    return AcceptCapacityAction::start_accept;
+}
+
+void AcceptCapacityState::accept_completed() noexcept { accept_pending_ = false; }
+
+void AcceptCapacityState::retry_scheduled() noexcept { retry_pending_ = true; }
+
+void AcceptCapacityState::retry_completed() noexcept { retry_pending_ = false; }
+
+void AcceptCapacityState::session_started() noexcept { ++active_connections_; }
+
+void AcceptCapacityState::session_finished() noexcept {
+    if (active_connections_ > 0) {
+        --active_connections_;
+    }
+}
+
+void AcceptCapacityState::stop() noexcept { stopped_ = true; }
+
+std::size_t AcceptCapacityState::active_connections() const noexcept { return active_connections_; }
+
+std::size_t AcceptCapacityState::max_connections() const noexcept { return max_connections_; }
+
+ProxyPermit::ProxyPermit(std::shared_ptr<ProxyAdmissionState> state) noexcept
+    : state_(std::move(state)) {}
+
+std::optional<ProxyPermit> ProxyPermit::try_acquire(
+    std::shared_ptr<ProxyAdmissionState> state) noexcept {
+    if (!state || state->active_proxies_ >= state->max_proxies_) {
+        return std::nullopt;
+    }
+    ++state->active_proxies_;
+    return ProxyPermit{std::move(state)};
+}
+
+ProxyPermit::~ProxyPermit() { release(); }
+
+ProxyPermit::ProxyPermit(ProxyPermit&& other) noexcept : state_(std::move(other.state_)) {}
+
+ProxyPermit& ProxyPermit::operator=(ProxyPermit&& other) noexcept {
+    if (this != &other) {
+        release();
+        state_ = std::move(other.state_);
+    }
+    return *this;
+}
+
+void ProxyPermit::release() noexcept {
+    if (!state_) {
+        return;
+    }
+    auto state = std::move(state_);
+    state->release();
+}
+
+bool ProxyPermit::owns_capacity() const noexcept { return state_ != nullptr; }
+
+ProxyAdmissionState::ProxyAdmissionState(std::size_t max_proxies) noexcept
+    : max_proxies_(max_proxies) {}
+
+std::size_t ProxyAdmissionState::active_proxies() const noexcept { return active_proxies_; }
+
+std::size_t ProxyAdmissionState::max_proxies() const noexcept { return max_proxies_; }
+
+void ProxyAdmissionState::release() noexcept {
+    if (active_proxies_ > 0) {
+        --active_proxies_;
+    }
+}
+
 }  // namespace detail
 
 namespace {
@@ -84,10 +174,12 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     using CloseCallback = std::function<void(HttpSession*)>;
 
     HttpSession(tcp::socket socket, const AppConfig& config, StructuredLogger& logger,
+                std::shared_ptr<detail::ProxyAdmissionState> proxy_admission,
                 CloseCallback on_close)
         : stream_(std::move(socket)),
           config_(config),
           logger_(logger),
+          proxy_admission_(std::move(proxy_admission)),
           on_close_(std::move(on_close)) {
         boost::system::error_code error;
         const auto endpoint = stream_.socket().remote_endpoint(error);
@@ -102,6 +194,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
             proxy_exchange_->cancel();
             proxy_exchange_.reset();
         }
+        proxy_permit_.reset();
         boost::system::error_code operation_error;
         const auto cancel_error = stream_.socket().cancel(operation_error);
         if (cancel_error) {
@@ -209,6 +302,18 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
             if (!config_.upstream.has_value()) {
                 throw std::logic_error{"proxy request requires upstream configuration"};
             }
+            proxy_permit_ = detail::ProxyPermit::try_acquire(proxy_admission_);
+            if (!proxy_permit_) {
+                auto response =
+                    make_gateway_error_response(request, GatewayFailure::gateway_overloaded);
+                if (requests_served_ >= max_requests_per_connection) {
+                    response.keep_alive(false);
+                }
+                log_proxy_capacity_rejection(response.result_int());
+                log_request_completed("GET", "proxy", response.result_int());
+                write_response(std::move(response));
+                return;
+            }
             exchange = std::make_shared<HttpProxyExchange>(
                 stream_.get_executor(), config_.upstream.value(), request,
                 [weak_self = weak_from_this()](ProxyResult result) noexcept {
@@ -228,6 +333,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
                 exchange->cancel();
             }
             proxy_exchange_.reset();
+            proxy_permit_.reset();
             try {
                 auto response = make_gateway_error_response(request, GatewayFailure::bad_gateway);
                 log_proxy_failure(ProxyFailure{ProxyFailureStage::connect, 0},
@@ -244,6 +350,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     void on_proxy_complete(ProxyResult result) noexcept {
         try {
             proxy_exchange_.reset();
+            proxy_permit_.reset();
             if (finished_ || stopping_) {
                 return;
             }
@@ -263,6 +370,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
 
     void on_proxy_aborted() noexcept {
         proxy_exchange_.reset();
+        proxy_permit_.reset();
         if (finished_ || stopping_) {
             return;
         }
@@ -276,6 +384,17 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
                                                           {"status", status}});
         } catch (...) {
             write_fallback_diagnostic("http_upstream_failure_log_failed", failure.error_code);
+        }
+    }
+
+    void log_proxy_capacity_rejection(unsigned int status) noexcept {
+        try {
+            logger_.warn("http_proxy_rejected_capacity",
+                         {{"active_proxies", proxy_admission_->active_proxies()},
+                          {"max_proxies", proxy_admission_->max_proxies()},
+                          {"status", status}});
+        } catch (...) {
+            write_fallback_diagnostic("http_proxy_capacity_log_failed", 0);
         }
     }
 
@@ -357,10 +476,12 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     beast::flat_buffer buffer_{max_header_bytes + static_cast<std::size_t>(max_body_bytes)};
     const AppConfig& config_;
     StructuredLogger& logger_;
+    std::shared_ptr<detail::ProxyAdmissionState> proxy_admission_;
     CloseCallback on_close_;
     std::optional<http::request_parser<http::string_body>> parser_;
     std::optional<HttpResponse> response_;
     std::shared_ptr<HttpProxyExchange> proxy_exchange_;
+    std::optional<detail::ProxyPermit> proxy_permit_;
     std::string remote_address_;
     std::size_t requests_served_{0};
     bool stopping_{false};
@@ -377,6 +498,9 @@ class HttpServer::Impl {
           logger_(logger),
           acceptor_(io_context),
           accept_retry_timer_(io_context),
+          accept_capacity_(config.max_connections),
+          proxy_admission_(
+              std::make_shared<detail::ProxyAdmissionState>(config.max_concurrent_proxies)),
           on_runtime_failure_(std::move(on_runtime_failure)) {
         if (!on_runtime_failure_) {
             throw std::invalid_argument("runtime failure callback must not be empty");
@@ -401,7 +525,7 @@ class HttpServer::Impl {
 
         logger_.info("http_listener_started",
                      {{"address", config_.listen_address}, {"port", bound_port_}});
-        accept_next();
+        drive_accept();
     }
 
     void stop() noexcept {
@@ -409,6 +533,7 @@ class HttpServer::Impl {
             return;
         }
         stopping_ = true;
+        accept_capacity_.stop();
 
         boost::system::error_code operation_error;
         try {
@@ -449,14 +574,29 @@ class HttpServer::Impl {
     [[nodiscard]] std::uint16_t bound_port() const noexcept { return bound_port_; }
 
    private:
-    void accept_next() {
+    void drive_accept() {
+        switch (accept_capacity_.next_action()) {
+            case detail::AcceptCapacityAction::none:
+                return;
+            case detail::AcceptCapacityAction::pause:
+                log_accept_capacity("http_accept_paused_capacity");
+                return;
+            case detail::AcceptCapacityAction::resume_and_start:
+                log_accept_capacity("http_accept_resumed_capacity");
+                break;
+            case detail::AcceptCapacityAction::start_accept:
+                break;
+        }
+
         acceptor_.async_accept([this](const boost::system::error_code& error, tcp::socket socket) {
+            accept_capacity_.accept_completed();
             if (stopping_) {
                 return;
             }
             if (error) {
                 logger_.error("http_accept_failed", {{"error_code", error.value()}});
                 accept_retry_timer_.expires_after(accept_retry_delay);
+                accept_capacity_.retry_scheduled();
                 accept_retry_timer_.async_wait(
                     [this](const boost::system::error_code& timer_error) {
                         on_accept_retry_timer(timer_error);
@@ -465,24 +605,35 @@ class HttpServer::Impl {
             }
 
             auto session = std::make_shared<HttpSession>(
-                std::move(socket), config_, logger_,
+                std::move(socket), config_, logger_, proxy_admission_,
                 [this](HttpSession* closed_session) { remove_session(closed_session); });
             sessions_.insert(session);
+            accept_capacity_.session_started();
             session->start();
-            accept_next();
+            drive_accept();
         });
     }
 
     void on_accept_retry_timer(const boost::system::error_code& error) {
+        accept_capacity_.retry_completed();
         switch (detail::classify_accept_retry_completion(error, stopping_)) {
             case detail::AcceptRetryDisposition::retry:
-                accept_next();
+                drive_accept();
                 return;
             case detail::AcceptRetryDisposition::stopped:
                 return;
             case detail::AcceptRetryDisposition::fatal:
                 fail_accept_retry(error);
                 return;
+        }
+    }
+
+    void log_accept_capacity(std::string_view event) noexcept {
+        try {
+            logger_.info(event, {{"active_connections", accept_capacity_.active_connections()},
+                                 {"max_connections", accept_capacity_.max_connections()}});
+        } catch (...) {
+            write_fallback_diagnostic("http_accept_capacity_log_failed", 0);
         }
     }
 
@@ -502,6 +653,16 @@ class HttpServer::Impl {
         for (auto iterator = sessions_.begin(); iterator != sessions_.end(); ++iterator) {
             if (iterator->get() == closed_session) {
                 sessions_.erase(iterator);
+                accept_capacity_.session_finished();
+                try {
+                    drive_accept();
+                } catch (...) {
+                    if (runtime_failure_state_.claim()) {
+                        write_fallback_diagnostic("http_accept_resume_failed", 0);
+                        stop();
+                        on_runtime_failure_();
+                    }
+                }
                 return;
             }
         }
@@ -511,6 +672,8 @@ class HttpServer::Impl {
     StructuredLogger& logger_;
     tcp::acceptor acceptor_;
     asio::steady_timer accept_retry_timer_;
+    detail::AcceptCapacityState accept_capacity_;
+    std::shared_ptr<detail::ProxyAdmissionState> proxy_admission_;
     std::function<void()> on_runtime_failure_;
     detail::RuntimeFailureState runtime_failure_state_;
     std::set<std::shared_ptr<HttpSession>, std::owner_less<std::shared_ptr<HttpSession>>> sessions_;

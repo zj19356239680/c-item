@@ -15,6 +15,7 @@ using HttpResponse = boost::beast::http::response<boost::beast::http::string_bod
 enum class GatewayFailure : std::uint8_t {
     bad_gateway,
     gateway_timeout,
+    gateway_overloaded,
 };
 
 [[nodiscard]] HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& request);

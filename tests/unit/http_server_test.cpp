@@ -8,6 +8,7 @@
 #include <boost/system/error_code.hpp>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <stdexcept>
 #include <string_view>
 
@@ -18,10 +19,14 @@
 namespace {
 
 namespace asio = boost::asio;
+using apigate::detail::AcceptCapacityAction;
+using apigate::detail::AcceptCapacityState;
 using apigate::detail::AcceptRetryDisposition;
 using apigate::detail::classify_accept_retry_completion;
 using apigate::detail::classify_http_write_result;
 using apigate::detail::HttpWriteDisposition;
+using apigate::detail::ProxyAdmissionState;
+using apigate::detail::ProxyPermit;
 using apigate::detail::run_accept_retry_failure_actions;
 using apigate::detail::RuntimeFailureState;
 
@@ -86,6 +91,110 @@ TEST(AcceptRetryDispositionTest, TreatsUnexpectedCancellationAsFatal) {
 
     EXPECT_EQ(classify_accept_retry_completion(operation_aborted, false),
               AcceptRetryDisposition::fatal);
+}
+
+TEST(AcceptCapacityStateTest, PausesAndResumesWithoutDuplicateAccepts) {
+    AcceptCapacityState state{1};
+
+    EXPECT_EQ(state.next_action(), AcceptCapacityAction::start_accept);
+    EXPECT_EQ(state.next_action(), AcceptCapacityAction::none);
+    state.accept_completed();
+    state.session_started();
+    EXPECT_EQ(state.active_connections(), 1U);
+    EXPECT_EQ(state.max_connections(), 1U);
+    EXPECT_EQ(state.next_action(), AcceptCapacityAction::pause);
+    EXPECT_EQ(state.next_action(), AcceptCapacityAction::none);
+
+    state.session_finished();
+    EXPECT_EQ(state.next_action(), AcceptCapacityAction::resume_and_start);
+    EXPECT_EQ(state.next_action(), AcceptCapacityAction::none);
+}
+
+TEST(AcceptCapacityStateTest, CoordinatesRetryAndStopWithCapacity) {
+    AcceptCapacityState state{2};
+
+    EXPECT_EQ(state.next_action(), AcceptCapacityAction::start_accept);
+    state.accept_completed();
+    state.retry_scheduled();
+    EXPECT_EQ(state.next_action(), AcceptCapacityAction::none);
+    state.retry_completed();
+    EXPECT_EQ(state.next_action(), AcceptCapacityAction::start_accept);
+    state.stop();
+    state.accept_completed();
+    EXPECT_EQ(state.next_action(), AcceptCapacityAction::none);
+}
+
+TEST(ProxyAdmissionStateTest, EnforcesLimitAndReusesReleasedCapacity) {
+    const auto state = std::make_shared<ProxyAdmissionState>(2);
+    auto first = ProxyPermit::try_acquire(state);
+    auto second = ProxyPermit::try_acquire(state);
+
+    if (!first || !second) {
+        FAIL() << "expected both permits to be admitted";
+        return;
+    }
+    EXPECT_EQ(state->active_proxies(), 2U);
+    EXPECT_EQ(state->max_proxies(), 2U);
+    EXPECT_FALSE(ProxyPermit::try_acquire(state).has_value());
+
+    first->release();
+    first->release();
+    EXPECT_EQ(state->active_proxies(), 1U);
+    EXPECT_TRUE(ProxyPermit::try_acquire(state).has_value());
+    EXPECT_EQ(state->active_proxies(), 1U);
+}
+
+TEST(ProxyAdmissionStateTest, MoveKeepsASinglePermitOwner) {
+    const auto state = std::make_shared<ProxyAdmissionState>(1);
+    auto permit = ProxyPermit::try_acquire(state);
+    if (!permit) {
+        FAIL() << "expected permit to be admitted";
+        return;
+    }
+
+    ProxyPermit moved{std::move(permit.value())};
+
+    EXPECT_FALSE(permit->owns_capacity());
+    EXPECT_TRUE(moved.owns_capacity());
+    permit->release();
+    EXPECT_EQ(state->active_proxies(), 1U);
+    moved.release();
+    moved.release();
+    EXPECT_EQ(state->active_proxies(), 0U);
+}
+
+TEST(ProxyAdmissionStateTest, TerminalPathsReleaseExactlyOnce) {
+    enum class TerminalPath : std::uint8_t {
+        success,
+        failure,
+        cancellation,
+        exception,
+    };
+    const TerminalPath paths[] = {TerminalPath::success, TerminalPath::failure,
+                                  TerminalPath::cancellation, TerminalPath::exception};
+
+    for (const auto path : paths) {
+        const auto state = std::make_shared<ProxyAdmissionState>(1);
+        bool exception_observed = false;
+        try {
+            auto permit = ProxyPermit::try_acquire(state);
+            if (!permit) {
+                ADD_FAILURE() << "expected permit to be admitted";
+                continue;
+            }
+            if (path == TerminalPath::exception) {
+                throw std::runtime_error{"simulated proxy transition failure"};
+            }
+            permit->release();
+            permit->release();
+        } catch (const std::runtime_error&) {
+            exception_observed = true;
+        }
+        EXPECT_EQ(exception_observed, path == TerminalPath::exception);
+        EXPECT_EQ(state->active_proxies(), 0U);
+        EXPECT_TRUE(ProxyPermit::try_acquire(state).has_value());
+        EXPECT_EQ(state->active_proxies(), 0U);
+    }
 }
 
 TEST(HttpServerTest, RejectsEmptyRuntimeFailureCallback) {
