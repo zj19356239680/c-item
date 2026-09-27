@@ -20,6 +20,25 @@ SUPPORTED_LOG_LEVELS = {"trace", "debug", "info", "warning", "error", "critical"
 UTC_TIMESTAMP_PATTERN = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
 )
+APIGATE_ENVIRONMENT_VARIABLES = (
+    "APIGATE_SERVICE_NAME",
+    "APIGATE_ENVIRONMENT",
+    "APIGATE_LOG_LEVEL",
+    "APIGATE_LISTEN_ADDRESS",
+    "APIGATE_LISTEN_PORT",
+    "APIGATE_UPSTREAM_HOST",
+    "APIGATE_UPSTREAM_PORT",
+    "APIGATE_UPSTREAM_TIMEOUT_MS",
+)
+
+
+def build_test_environment(overrides=None):
+    environment = os.environ.copy()
+    for variable_name in APIGATE_ENVIRONMENT_VARIABLES:
+        environment.pop(variable_name, None)
+    if overrides:
+        environment.update(overrides)
+    return environment
 
 
 def safe_log_summary(line_number, line, reason):
@@ -138,8 +157,7 @@ def parse_single_json_log(output):
 
 class ServiceProcess:
     def __init__(self, binary, extra_env=None):
-        environment = os.environ.copy()
-        environment.update(
+        environment = build_test_environment(
             {
                 "APIGATE_LISTEN_ADDRESS": "127.0.0.1",
                 "APIGATE_LISTEN_PORT": "0",
@@ -271,9 +289,11 @@ def test_invalid_log_detection():
 
 def test_command_line(binary, expected_version):
     expected_output = f"api-gate {expected_version}\n"
+    clean_environment = build_test_environment()
 
     version = subprocess.run(
         [binary, "--version"],
+        env=clean_environment,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -285,8 +305,7 @@ def test_command_line(binary, expected_version):
     assert version.stdout.splitlines() == [f"api-gate {expected_version}"]
     assert not version.stderr
 
-    invalid_environment = os.environ.copy()
-    invalid_environment.update(
+    invalid_environment = build_test_environment(
         {
             "APIGATE_SERVICE_NAME": "invalid/service",
             "APIGATE_ENVIRONMENT": "",
@@ -312,8 +331,7 @@ def test_command_line(binary, expected_version):
         holder.bind(("127.0.0.1", 0))
         holder.listen(1)
         occupied_port = holder.getsockname()[1]
-        occupied_environment = os.environ.copy()
-        occupied_environment.update(
+        occupied_environment = build_test_environment(
             {
                 "APIGATE_LISTEN_ADDRESS": "127.0.0.1",
                 "APIGATE_LISTEN_PORT": str(occupied_port),
@@ -334,6 +352,7 @@ def test_command_line(binary, expected_version):
 
     help_result = subprocess.run(
         [binary, "--help"],
+        env=clean_environment,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -342,6 +361,9 @@ def test_command_line(binary, expected_version):
     )
     assert help_result.returncode == 0
     assert "--version" in help_result.stdout
+    assert "APIGATE_UPSTREAM_HOST" in help_result.stdout
+    assert "APIGATE_UPSTREAM_PORT" in help_result.stdout
+    assert "APIGATE_UPSTREAM_TIMEOUT_MS" in help_result.stdout
     assert not help_result.stderr
 
     for arguments in (
@@ -351,6 +373,7 @@ def test_command_line(binary, expected_version):
     ):
         rejected = subprocess.run(
             [binary, *arguments],
+            env=clean_environment,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -460,6 +483,44 @@ def test_http_and_shutdown(binary):
         service.wait_for_event("service_stopped")
     finally:
         service.cleanup()
+
+
+def test_service_environment_isolation(binary):
+    saved_values = {
+        name: os.environ.get(name) for name in APIGATE_ENVIRONMENT_VARIABLES
+    }
+    try:
+        for inherited_upstream in (
+            {
+                "APIGATE_UPSTREAM_HOST": "127.0.0.1",
+                "APIGATE_UPSTREAM_PORT": "1",
+                "APIGATE_UPSTREAM_TIMEOUT_MS": "1",
+            },
+            {"APIGATE_UPSTREAM_HOST": "incomplete.invalid"},
+            {"APIGATE_UPSTREAM_PORT": "8080"},
+        ):
+            for name in APIGATE_ENVIRONMENT_VARIABLES:
+                os.environ.pop(name, None)
+            os.environ.update(inherited_upstream)
+            service = ServiceProcess(binary)
+            try:
+                port = int(service.wait_for_event("http_listener_started")["port"])
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+                missing, body = read_json_response(connection, "GET", "/missing")
+                connection.close()
+                assert missing.status == 404
+                assert body["error"]["code"] == "not_found"
+                service.terminate()
+                assert service.process.wait(timeout=5) == 0
+                service.finish_log_reader()
+            finally:
+                service.cleanup()
+    finally:
+        for name in APIGATE_ENVIRONMENT_VARIABLES:
+            os.environ.pop(name, None)
+        for name, value in saved_values.items():
+            if value is not None:
+                os.environ[name] = value
 
 
 def test_active_keep_alive_shutdown(binary):
@@ -574,8 +635,7 @@ def test_port_conflict_and_config_check(binary):
         holder.bind(("127.0.0.1", 0))
         holder.listen(1)
         port = holder.getsockname()[1]
-        environment = os.environ.copy()
-        environment.update(
+        environment = build_test_environment(
             {
                 "APIGATE_SERVICE_NAME": "config-check-test",
                 "APIGATE_ENVIRONMENT": "integration",
@@ -624,6 +684,8 @@ def test_port_conflict_and_config_check(binary):
             assert payload["log_level"] == log_level
             assert payload["listen_address"] == "127.0.0.1"
             assert payload["listen_port"] == port
+            assert payload["proxy_enabled"] is False
+            assert "upstream_timeout_ms" not in payload
 
         private_marker = "invalid-config-private-marker-20260926"
         invalid_environment = environment.copy()
@@ -656,6 +718,7 @@ def main():
     expected_version = sys.argv[2]
     test_invalid_log_detection()
     test_command_line(binary, expected_version)
+    test_service_environment_isolation(binary)
     test_http_and_shutdown(binary)
     test_active_keep_alive_shutdown(binary)
     test_sensitive_request_data_not_logged(binary)

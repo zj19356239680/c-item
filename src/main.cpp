@@ -42,13 +42,17 @@ enum class Command : std::uint8_t {
 }
 
 void print_help() {
-    std::cout << "Usage: api-gate [--check-config | --help | --version]\n"
-              << "\nEnvironment variables:\n"
-              << "  APIGATE_SERVICE_NAME  Service label (default: api-gate)\n"
-              << "  APIGATE_ENVIRONMENT   Runtime environment (default: development)\n"
-              << "  APIGATE_LOG_LEVEL     trace|debug|info|warn|error|critical\n"
-              << "  APIGATE_LISTEN_ADDRESS IP address to bind (default: 127.0.0.1)\n"
-              << "  APIGATE_LISTEN_PORT   TCP port, 0 selects an ephemeral port (default: 8080)\n";
+    std::cout
+        << "Usage: api-gate [--check-config | --help | --version]\n"
+        << "\nEnvironment variables:\n"
+        << "  APIGATE_SERVICE_NAME  Service label (default: api-gate)\n"
+        << "  APIGATE_ENVIRONMENT   Runtime environment (default: development)\n"
+        << "  APIGATE_LOG_LEVEL     trace|debug|info|warn|error|critical\n"
+        << "  APIGATE_LISTEN_ADDRESS IP address to bind (default: 127.0.0.1)\n"
+        << "  APIGATE_LISTEN_PORT   TCP port, 0 selects an ephemeral port (default: 8080)\n"
+        << "  APIGATE_UPSTREAM_HOST Optional static HTTP upstream host\n"
+        << "  APIGATE_UPSTREAM_PORT Optional static HTTP upstream port (1-65535)\n"
+        << "  APIGATE_UPSTREAM_TIMEOUT_MS Per-stage timeout in milliseconds (default: 3000)\n";
 }
 
 void print_version() { std::cout << "api-gate " << apigate::version << '\n'; }
@@ -85,9 +89,14 @@ int main(int argc, char* argv[]) {
         const apigate::AppConfig config = apigate::load_config_from_environment();
         apigate::StructuredLogger logger{config};
         if (command == Command::check_config) {
-            logger.write_configuration_valid({{"log_level", apigate::to_string(config.log_level)},
-                                              {"listen_address", config.listen_address},
-                                              {"listen_port", config.listen_port}});
+            nlohmann::json fields{{"log_level", apigate::to_string(config.log_level)},
+                                  {"listen_address", config.listen_address},
+                                  {"listen_port", config.listen_port},
+                                  {"proxy_enabled", config.upstream.has_value()}};
+            if (config.upstream) {
+                fields["upstream_timeout_ms"] = config.upstream->timeout_ms;
+            }
+            logger.write_configuration_valid(fields);
             return EXIT_SUCCESS;
         }
 

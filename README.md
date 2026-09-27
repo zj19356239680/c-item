@@ -1,9 +1,9 @@
 # ApiGate
 
-ApiGate 是一个用于学习和逐步开发 API 网关的 C++20 项目。当前版本只提供最小的异步
-HTTP/1.1 服务：健康检查、配置校验和 JSON 日志。它**尚不能转发请求**，也没有缓存、
-限流、认证、TLS 或 HTTP/2；不要把它当作生产网关。本项目在 Linux 环境下开发，
-仅支持 Linux 构建与运行。
+ApiGate 是一个用于学习和逐步开发 API 网关的 C++20 项目。当前版本提供异步
+HTTP/1.1 健康检查、配置校验、JSON 日志，以及可选的单一静态 HTTP 上游 GET 代理。
+它没有多上游、请求体代理、重试、连接池、缓存、限流、认证、TLS 或 HTTP/2；不要把
+它当作生产网关。本项目在 Linux 环境下开发，仅支持 Linux 构建与运行。
 
 ## 快速启动与验证
 
@@ -63,6 +63,20 @@ curl -fsS http://127.0.0.1:8080/readyz
 64 KiB 返回 413；格式错误请求可能返回 400 或直接断开。当前行为尚未制定版本化的
 API 兼容承诺，具体设计边界见[设计文档](设计文档.md)。
 
+同时设置 `APIGATE_UPSTREAM_HOST` 和 `APIGATE_UPSTREAM_PORT` 后，除
+`/healthz`、`/readyz` 外的 origin-form `GET` 会代理到该 HTTP 上游，原始路径和查询
+保持不变。代理只接受无正文 GET；带非空正文、absolute-form 或 Upgrade 的候选请求
+返回安全的 400 JSON。非 GET 仍返回 405。上游解析、连接、写入、读取、协议错误或
+响应超限返回 502，任一上游阶段超时返回 504；上游 1xx 信息响应（包括 101）也会被
+拒绝为 502，不继续读取后续响应或切换协议。错误正文不会包含上游地址、请求目标或
+系统错误文本。上游响应正文上限为 1 MiB，且每个请求都新建上游连接，不自动重试。
+
+代理会移除请求和响应中的标准 hop-by-hop 头以及 `Connection` 动态列出的头，覆盖
+上游 `Host`，并将下游 `Server` 保持为 `ApiGate`。`Authorization`、`Cookie` 等
+端到端请求头会转发给所配置上游，但不会写入 ApiGate 日志。客户端提供的
+`X-Forwarded-*` 不会被信任或转发，本阶段也不生成这些头。启用代理不会改变本地
+健康端点；`/readyz` 仍不主动探测上游。
+
 ## 构建、测试与运行
 
 在仓库根目录执行：
@@ -100,12 +114,26 @@ bash scripts/run.sh --version
 | `APIGATE_LOG_LEVEL` | `info` | `trace`、`debug`、`info`、`warn`、`error`、`critical` |
 | `APIGATE_LISTEN_ADDRESS` | `127.0.0.1` | IPv4/IPv6 字面地址，不解析主机名 |
 | `APIGATE_LISTEN_PORT` | `8080` | 0–65535；0 由内核分配临时端口 |
+| `APIGATE_UPSTREAM_HOST` | 未设置 | 纯 DNS 主机名、IPv4 或 IPv6 字面地址；必须与端口同时设置 |
+| `APIGATE_UPSTREAM_PORT` | 未设置 | 1–65535；必须与主机同时设置 |
+| `APIGATE_UPSTREAM_TIMEOUT_MS` | `3000`（代理启用时） | 1–60000；仅可与完整上游配置一起使用 |
 
 例如，换一个本机端口运行：
 
 ```bash
 APIGATE_LISTEN_PORT=9000 bash scripts/run.sh
 ```
+
+例如，把未知 GET 转发到本机测试上游：
+
+```bash
+APIGATE_UPSTREAM_HOST=127.0.0.1 \
+APIGATE_UPSTREAM_PORT=9001 \
+bash scripts/run.sh
+```
+
+三项上游变量均未设置时代理关闭，原有未知 GET 的 404 行为保持不变。配置检查结果只
+报告 `proxy_enabled` 和启用时的 `upstream_timeout_ms`，不会输出上游主机名。
 
 无效配置会在监听前失败并以非零状态退出。不要将密码或令牌写入
 `.env.example`、命令行或仓库；若自行创建 `.env`，该文件已被 Git 忽略。

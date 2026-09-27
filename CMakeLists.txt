@@ -46,6 +46,7 @@ add_library(apigate_core
     src/application.cpp
     src/config.cpp
     src/http_handler.cpp
+    src/http_proxy.cpp
     src/http_server.cpp
     src/logging.cpp)
 target_include_directories(apigate_core PUBLIC
@@ -69,6 +70,7 @@ if(BUILD_TESTING)
     add_executable(apigate_unit_tests
         tests/unit/config_test.cpp
         tests/unit/http_handler_test.cpp
+        tests/unit/http_proxy_test.cpp
         tests/unit/http_server_test.cpp
         tests/unit/logging_test.cpp)
     target_include_directories(apigate_unit_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
@@ -91,6 +93,9 @@ if(BUILD_TESTING)
     add_test(NAME integration.http_server
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/http_server_test.py
                 $<TARGET_FILE:api-gate> ${PROJECT_VERSION})
+    add_test(NAME integration.http_proxy
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/http_proxy_test.py
+                $<TARGET_FILE:api-gate>)
     set_tests_properties(
         integration.config_check
         integration.service_lifecycle
@@ -98,7 +103,9 @@ if(BUILD_TESTING)
         integration.install_deps_safety
         integration.container_smoke_safety
         integration.http_server
+        integration.http_proxy
         PROPERTIES TIMEOUT 15)
     set_tests_properties(integration.http_server PROPERTIES TIMEOUT 40)
+    set_tests_properties(integration.http_proxy PROPERTIES TIMEOUT 30)
     set_tests_properties(integration.install_deps_safety PROPERTIES SKIP_RETURN_CODE 77)
 endif()

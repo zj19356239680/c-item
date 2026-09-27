@@ -9,11 +9,14 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <utility>
 
 namespace apigate {
 namespace {
 
 constexpr std::size_t max_label_length = 64;
+constexpr std::size_t max_hostname_length = 253;
+constexpr std::uint32_t max_upstream_timeout_ms = 60000;
 
 [[nodiscard]] std::optional<std::string> read_environment(const char* name) {
     // Configuration is loaded once, before any worker threads can mutate the environment.
@@ -80,6 +83,68 @@ void validate_label(std::string_view value, const char* variable_name) {
     return static_cast<std::uint16_t>(port);
 }
 
+[[nodiscard]] std::uint16_t parse_upstream_port(std::string_view value) {
+    unsigned int port = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), port);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || port == 0 ||
+        port > std::numeric_limits<std::uint16_t>::max()) {
+        throw ConfigError("APIGATE_UPSTREAM_PORT must be an integer from 1 to 65535");
+    }
+    return static_cast<std::uint16_t>(port);
+}
+
+[[nodiscard]] std::uint32_t parse_upstream_timeout(std::string_view value) {
+    std::uint32_t timeout = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), timeout);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || timeout == 0 ||
+        timeout > max_upstream_timeout_ms) {
+        throw ConfigError("APIGATE_UPSTREAM_TIMEOUT_MS must be an integer from 1 to 60000");
+    }
+    return timeout;
+}
+
+void validate_dns_hostname(std::string_view value) {
+    if (value.size() > max_hostname_length || value.front() == '.' || value.back() == '.') {
+        throw ConfigError("APIGATE_UPSTREAM_HOST must be a valid hostname or IP address");
+    }
+
+    std::size_t label_length = 0;
+    bool label_starts_with_hyphen = false;
+    char previous = '\0';
+    for (const char raw_character : value) {
+        const auto character = static_cast<unsigned char>(raw_character);
+        if (character == '.') {
+            if (label_length == 0 || label_length > 63 || label_starts_with_hyphen ||
+                previous == '-') {
+                throw ConfigError("APIGATE_UPSTREAM_HOST must be a valid hostname or IP address");
+            }
+            label_length = 0;
+            label_starts_with_hyphen = false;
+        } else if (std::isalnum(character) != 0 || character == '-') {
+            if (label_length == 0) {
+                label_starts_with_hyphen = character == '-';
+            }
+            ++label_length;
+        } else {
+            throw ConfigError("APIGATE_UPSTREAM_HOST must be a valid hostname or IP address");
+        }
+        previous = static_cast<char>(character);
+    }
+    if (label_length == 0 || label_length > 63 || label_starts_with_hyphen || previous == '-') {
+        throw ConfigError("APIGATE_UPSTREAM_HOST must be a valid hostname or IP address");
+    }
+}
+
+[[nodiscard]] std::string parse_upstream_host(std::string_view value) {
+    boost::system::error_code error;
+    const auto address = boost::asio::ip::make_address(value, error);
+    if (!error) {
+        return address.to_string();
+    }
+    validate_dns_hostname(value);
+    return std::string{value};
+}
+
 }  // namespace
 
 AppConfig load_config_from_environment() {
@@ -100,6 +165,24 @@ AppConfig load_config_from_environment() {
     }
     if (const auto value = read_environment("APIGATE_LISTEN_PORT")) {
         config.listen_port = parse_listen_port(*value);
+    }
+
+    const auto upstream_host = read_environment("APIGATE_UPSTREAM_HOST");
+    const auto upstream_port = read_environment("APIGATE_UPSTREAM_PORT");
+    const auto upstream_timeout = read_environment("APIGATE_UPSTREAM_TIMEOUT_MS");
+    if (upstream_host.has_value() != upstream_port.has_value() ||
+        (upstream_timeout.has_value() && !upstream_host.has_value())) {
+        throw ConfigError(
+            "APIGATE_UPSTREAM_HOST and APIGATE_UPSTREAM_PORT must be set together; "
+            "APIGATE_UPSTREAM_TIMEOUT_MS requires both");
+    }
+    if (upstream_host) {
+        UpstreamConfig upstream{parse_upstream_host(*upstream_host),
+                                parse_upstream_port(*upstream_port), 3000};
+        if (upstream_timeout) {
+            upstream.timeout_ms = parse_upstream_timeout(*upstream_timeout);
+        }
+        config.upstream = std::move(upstream);
     }
     return config;
 }

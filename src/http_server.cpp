@@ -23,6 +23,7 @@
 #include "apigate/config.hpp"
 #include "apigate/http_handler.hpp"
 #include "apigate/logging.hpp"
+#include "http_proxy.hpp"
 #include "http_server_internal.hpp"
 
 namespace apigate {
@@ -97,6 +98,10 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
 
     void stop() noexcept {
         stopping_ = true;
+        if (proxy_exchange_) {
+            proxy_exchange_->cancel();
+            proxy_exchange_.reset();
+        }
         boost::system::error_code operation_error;
         const auto cancel_error = stream_.socket().cancel(operation_error);
         if (cancel_error) {
@@ -144,6 +149,10 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
             }
             ++requests_served_;
             const auto& request = parser_.value().get();
+            if (should_proxy_http_request(config_, request)) {
+                start_proxy_request(request);
+                return;
+            }
             auto response = handle_http_request(config_, request);
             if (requests_served_ >= max_requests_per_connection) {
                 response.keep_alive(false);
@@ -153,10 +162,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
             const std::string method{request.method_string().data(),
                                      request.method_string().size()};
             const std::string route{classify_http_route(target)};
-            logger_.info("http_request_completed", {{"method", method},
-                                                    {"route", route},
-                                                    {"status", response.result_int()},
-                                                    {"remote_address", remote_address_}});
+            log_request_completed(method, route, response.result_int());
             write_response(std::move(response));
             return;
         }
@@ -195,6 +201,94 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         logger_.warn("http_request_rejected",
                      {{"reason", std::string{code}}, {"status", response.result_int()}});
         write_response(std::move(response));
+    }
+
+    void start_proxy_request(const HttpRequest& request) noexcept {
+        std::shared_ptr<HttpProxyExchange> exchange;
+        try {
+            if (!config_.upstream.has_value()) {
+                throw std::logic_error{"proxy request requires upstream configuration"};
+            }
+            exchange = std::make_shared<HttpProxyExchange>(
+                stream_.get_executor(), config_.upstream.value(), request,
+                [weak_self = weak_from_this()](ProxyResult result) noexcept {
+                    if (const auto self = weak_self.lock()) {
+                        self->on_proxy_complete(std::move(result));
+                    }
+                },
+                [weak_self = weak_from_this()]() noexcept {
+                    if (const auto self = weak_self.lock()) {
+                        self->on_proxy_aborted();
+                    }
+                });
+            proxy_exchange_ = exchange;
+            exchange->start();
+        } catch (...) {
+            if (exchange) {
+                exchange->cancel();
+            }
+            proxy_exchange_.reset();
+            try {
+                auto response = make_gateway_error_response(request, GatewayFailure::bad_gateway);
+                log_proxy_failure(ProxyFailure{ProxyFailureStage::connect, 0},
+                                  response.result_int());
+                log_request_completed("GET", "proxy", response.result_int());
+                write_response(std::move(response));
+            } catch (...) {
+                write_fallback_diagnostic("http_proxy_start_failed", 0);
+                close_socket();
+            }
+        }
+    }
+
+    void on_proxy_complete(ProxyResult result) noexcept {
+        try {
+            proxy_exchange_.reset();
+            if (finished_ || stopping_) {
+                return;
+            }
+            if (requests_served_ >= max_requests_per_connection) {
+                result.response.keep_alive(false);
+            }
+            if (result.failure) {
+                log_proxy_failure(*result.failure, result.response.result_int());
+            }
+            log_request_completed("GET", "proxy", result.response.result_int());
+            write_response(std::move(result.response));
+        } catch (...) {
+            write_fallback_diagnostic("http_proxy_completion_failed", 0);
+            close_socket();
+        }
+    }
+
+    void on_proxy_aborted() noexcept {
+        proxy_exchange_.reset();
+        if (finished_ || stopping_) {
+            return;
+        }
+        close_socket();
+    }
+
+    void log_proxy_failure(const ProxyFailure& failure, unsigned int status) noexcept {
+        try {
+            logger_.warn("http_upstream_request_failed", {{"stage", to_string(failure.stage)},
+                                                          {"error_code", failure.error_code},
+                                                          {"status", status}});
+        } catch (...) {
+            write_fallback_diagnostic("http_upstream_failure_log_failed", failure.error_code);
+        }
+    }
+
+    void log_request_completed(std::string_view method, std::string_view route,
+                               unsigned int status) noexcept {
+        try {
+            logger_.info("http_request_completed", {{"method", method},
+                                                    {"route", route},
+                                                    {"status", status},
+                                                    {"remote_address", remote_address_}});
+        } catch (...) {
+            write_fallback_diagnostic("http_request_log_failed", 0);
+        }
     }
 
     void write_response(HttpResponse response) {
@@ -266,6 +360,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     CloseCallback on_close_;
     std::optional<http::request_parser<http::string_body>> parser_;
     std::optional<HttpResponse> response_;
+    std::shared_ptr<HttpProxyExchange> proxy_exchange_;
     std::string remote_address_;
     std::size_t requests_served_{0};
     bool stopping_{false};

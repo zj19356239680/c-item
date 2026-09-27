@@ -15,6 +15,14 @@ namespace http = boost::beast::http;
     return target.substr(0, query_position);
 }
 
+[[nodiscard]] bool is_supported_proxy_target(std::string_view target) noexcept {
+    return !target.empty() && target.front() == '/' && target.find('#') == std::string_view::npos;
+}
+
+[[nodiscard]] bool requests_upgrade(const HttpRequest& request) noexcept {
+    return request.find(http::field::upgrade) != request.end();
+}
+
 [[nodiscard]] HttpResponse make_json_response(const HttpRequest& request, http::status status,
                                               const nlohmann::json& body) {
     HttpResponse response{status, request.version()};
@@ -40,6 +48,18 @@ std::string_view classify_http_route(std::string_view target) noexcept {
     return "unmatched";
 }
 
+bool should_proxy_http_request(const AppConfig& config, const HttpRequest& request) noexcept {
+    if (!config.upstream || request.method() != http::verb::get) {
+        return false;
+    }
+    const std::string_view target{request.target().data(), request.target().size()};
+    if (classify_http_route(target) != "unmatched") {
+        return false;
+    }
+    return is_supported_proxy_target(target) && !requests_upgrade(request) &&
+           request.body().empty();
+}
+
 HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& request) {
     if (request.method() != http::verb::get) {
         auto response = make_json_response(
@@ -47,6 +67,13 @@ HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& req
             {{"error", {{"code", "method_not_allowed"}, {"message", "only GET is supported"}}}});
         response.set(http::field::allow, "GET");
         return response;
+    }
+
+    if (config.upstream && requests_upgrade(request)) {
+        return make_json_response(
+            request, http::status::bad_request,
+            {{"error",
+              {{"code", "unsupported_request"}, {"message", "request cannot be proxied"}}}});
     }
 
     const std::string_view target{request.target().data(), request.target().size()};
@@ -59,8 +86,25 @@ HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& req
         return make_json_response(request, http::status::ok,
                                   {{"status", "ready"}, {"service", config.service_name}});
     }
+    if (config.upstream && (!is_supported_proxy_target(target) || !request.body().empty())) {
+        return make_json_response(
+            request, http::status::bad_request,
+            {{"error",
+              {{"code", "unsupported_request"}, {"message", "request cannot be proxied"}}}});
+    }
     return make_json_response(request, http::status::not_found,
                               {{"error", {{"code", "not_found"}, {"message", "route not found"}}}});
+}
+
+HttpResponse make_gateway_error_response(const HttpRequest& request, GatewayFailure failure) {
+    if (failure == GatewayFailure::gateway_timeout) {
+        return make_json_response(
+            request, http::status::gateway_timeout,
+            {{"error", {{"code", "gateway_timeout"}, {"message", "upstream request timed out"}}}});
+    }
+    return make_json_response(
+        request, http::status::bad_gateway,
+        {{"error", {{"code", "bad_gateway"}, {"message", "upstream request failed"}}}});
 }
 
 }  // namespace apigate
