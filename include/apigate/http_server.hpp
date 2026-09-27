@@ -3,6 +3,7 @@
 
 #include <boost/asio/io_context.hpp>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 namespace apigate {
@@ -13,7 +14,7 @@ class StructuredLogger;
 class HttpServer {
    public:
     HttpServer(boost::asio::io_context& io_context, const AppConfig& config,
-               StructuredLogger& logger);
+               StructuredLogger& logger, std::function<void()> on_runtime_failure);
     ~HttpServer();
 
     HttpServer(const HttpServer&) = delete;

@@ -484,6 +484,7 @@ def test_active_keep_alive_shutdown(binary):
         service.wait_for_event("http_listener_stopped")
         service.wait_for_event("service_stopped")
         assert_event_absent("".join(service.lines), "http_response_write_failed")
+        assert_event_absent("".join(service.lines), "http_accept_retry_failed")
     finally:
         if connection is not None:
             connection.close()
@@ -543,6 +544,7 @@ def test_sensitive_request_data_not_logged(binary):
 
         complete_output = "".join(service.lines)
         assert_event_absent(complete_output, "http_response_write_failed")
+        assert_event_absent(complete_output, "http_accept_retry_failed")
         records = assert_normal_log_output(complete_output)
         request_events = [
             record

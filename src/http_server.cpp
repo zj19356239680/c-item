@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -42,6 +43,17 @@ HttpWriteDisposition classify_http_write_result(const boost::system::error_code&
         return HttpWriteDisposition::client_disconnected;
     }
     return HttpWriteDisposition::unexpected_error;
+}
+
+AcceptRetryDisposition classify_accept_retry_completion(const boost::system::error_code& error,
+                                                        bool stopping) noexcept {
+    if (stopping) {
+        return AcceptRetryDisposition::stopped;
+    }
+    if (error) {
+        return AcceptRetryDisposition::fatal;
+    }
+    return AcceptRetryDisposition::retry;
 }
 
 }  // namespace detail
@@ -264,11 +276,17 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
 
 class HttpServer::Impl {
    public:
-    Impl(asio::io_context& io_context, const AppConfig& config, StructuredLogger& logger)
+    Impl(asio::io_context& io_context, const AppConfig& config, StructuredLogger& logger,
+         std::function<void()> on_runtime_failure)
         : config_(config),
           logger_(logger),
           acceptor_(io_context),
-          accept_retry_timer_(io_context) {}
+          accept_retry_timer_(io_context),
+          on_runtime_failure_(std::move(on_runtime_failure)) {
+        if (!on_runtime_failure_) {
+            throw std::invalid_argument("runtime failure callback must not be empty");
+        }
+    }
 
     ~Impl() { stop(); }
 
@@ -346,9 +364,7 @@ class HttpServer::Impl {
                 accept_retry_timer_.expires_after(accept_retry_delay);
                 accept_retry_timer_.async_wait(
                     [this](const boost::system::error_code& timer_error) {
-                        if (!timer_error && !stopping_) {
-                            accept_next();
-                        }
+                        on_accept_retry_timer(timer_error);
                     });
                 return;
             }
@@ -360,6 +376,31 @@ class HttpServer::Impl {
             session->start();
             accept_next();
         });
+    }
+
+    void on_accept_retry_timer(const boost::system::error_code& error) {
+        switch (detail::classify_accept_retry_completion(error, stopping_)) {
+            case detail::AcceptRetryDisposition::retry:
+                accept_next();
+                return;
+            case detail::AcceptRetryDisposition::stopped:
+                return;
+            case detail::AcceptRetryDisposition::fatal:
+                fail_accept_retry(error);
+                return;
+        }
+    }
+
+    void fail_accept_retry(const boost::system::error_code& error) {
+        detail::run_accept_retry_failure_actions(
+            runtime_failure_state_,
+            [this, &error] {
+                logger_.critical("http_accept_retry_failed", {{"error_code", error.value()}});
+            },
+            [&error]() noexcept {
+                write_fallback_diagnostic("http_accept_retry_failed", error.value());
+            },
+            [this]() noexcept { stop(); }, [this]() noexcept { on_runtime_failure_(); });
     }
 
     void remove_session(HttpSession* closed_session) noexcept {
@@ -375,6 +416,8 @@ class HttpServer::Impl {
     StructuredLogger& logger_;
     tcp::acceptor acceptor_;
     asio::steady_timer accept_retry_timer_;
+    std::function<void()> on_runtime_failure_;
+    detail::RuntimeFailureState runtime_failure_state_;
     std::set<std::shared_ptr<HttpSession>, std::owner_less<std::shared_ptr<HttpSession>>> sessions_;
     std::uint16_t bound_port_{0};
     bool started_{false};
@@ -382,8 +425,8 @@ class HttpServer::Impl {
 };
 
 HttpServer::HttpServer(asio::io_context& io_context, const AppConfig& config,
-                       StructuredLogger& logger)
-    : impl_(std::make_unique<Impl>(io_context, config, logger)) {}
+                       StructuredLogger& logger, std::function<void()> on_runtime_failure)
+    : impl_(std::make_unique<Impl>(io_context, config, logger, std::move(on_runtime_failure))) {}
 
 HttpServer::~HttpServer() = default;
 

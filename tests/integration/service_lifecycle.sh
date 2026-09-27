@@ -50,3 +50,7 @@ service_pid=
 
 grep -q '"event":"shutdown_signal_received"' "${log_file}"
 grep -q '"event":"service_stopped"' "${log_file}"
+if grep -q '"event":"http_accept_retry_failed"' "${log_file}"; then
+    echo "normal shutdown unexpectedly reported an accept retry failure" >&2
+    exit 1
+fi

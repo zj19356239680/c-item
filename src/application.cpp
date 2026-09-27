@@ -18,34 +18,35 @@ namespace apigate {
 class Application::Impl {
    public:
     Impl(const AppConfig& config, StructuredLogger& logger)
-        : config_(config), logger_(logger), signals_(io_context_, SIGINT, SIGTERM) {}
+        : config_(config),
+          logger_(logger),
+          signals_(io_context_, SIGINT, SIGTERM),
+          server_(io_context_, config_, logger_, [this]() noexcept { on_runtime_failure(); }) {}
 
     [[nodiscard]] int run() {
-        HttpServer server{io_context_, config_, logger_};
         try {
-            server.start();
+            server_.start();
         } catch (const boost::system::system_error& error) {
             logger_.critical("http_server_start_failed", {{"error_code", error.code().value()}});
             return EXIT_FAILURE;
         }
 
-        signals_.async_wait(
-            [this, &server](const boost::system::error_code& error, int signal_number) {
-                if (error) {
-                    if (error != boost::asio::error::operation_aborted) {
-                        logger_.critical("signal_wait_failed", {{"error_code", error.value()}});
-                        exit_code_ = EXIT_FAILURE;
-                        server.stop();
-                    }
-                    return;
+        signals_.async_wait([this](const boost::system::error_code& error, int signal_number) {
+            if (error) {
+                if (error != boost::asio::error::operation_aborted) {
+                    logger_.critical("signal_wait_failed", {{"error_code", error.value()}});
+                    exit_code_ = EXIT_FAILURE;
+                    server_.stop();
                 }
+                return;
+            }
 
-                logger_.info("shutdown_signal_received", {{"signal", signal_number}});
-                server.stop();
-            });
+            logger_.info("shutdown_signal_received", {{"signal", signal_number}});
+            server_.stop();
+        });
 
         logger_.info("service_started", {{"listen_address", config_.listen_address},
-                                         {"listen_port", server.bound_port()}});
+                                         {"listen_port", server_.bound_port()}});
         const auto handlers_executed = io_context_.run();
         logger_.info("service_stopped",
                      {{"exit_code", exit_code_}, {"handlers_executed", handlers_executed}});
@@ -53,10 +54,16 @@ class Application::Impl {
     }
 
    private:
+    void on_runtime_failure() noexcept {
+        exit_code_ = EXIT_FAILURE;
+        io_context_.stop();
+    }
+
     AppConfig config_;
     StructuredLogger& logger_;
     boost::asio::io_context io_context_;
     boost::asio::signal_set signals_;
+    HttpServer server_;
     int exit_code_{EXIT_SUCCESS};
 };
 
