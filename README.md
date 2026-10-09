@@ -127,6 +127,30 @@ bash scripts/run.sh --version
 `project(VERSION ...)`。该命令不读取 `APIGATE_*` 配置、不创建日志器或监听 socket，
 也不输出服务运行日志。版本输出不包含 Git SHA、构建时间或构建主机信息。
 
+### VS Code Dev Container
+
+仓库的 `.devcontainer/` 提供独立的单容器 Linux 开发环境，不复用宿主 vcpkg，也不
+挂载 Docker socket。先安装 VS Code Dev Containers 扩展并确保 Docker 可用，再从
+WSL 中打开仓库，执行 `Dev Containers: Rebuild and Reopen in Container`。首次创建
+会以非 root `vscode` 用户运行 `scripts/install-deps.sh`，把固定版本的 vcpkg 准备到
+`/home/vscode/.local/share/apigate/vcpkg`；第一版不持久化跨重建缓存。
+
+进入容器后选择 CMake Configure Preset `linux-debug`，即可使用 CMake Tools 配置、
+构建和调试。C/C++ 扩展由 CMake Tools 提供配置，生成的
+`build/linux-debug/compile_commands.json` 可用于 IntelliSense。也可在容器终端执行：
+
+```bash
+cmake --preset linux-debug
+bash scripts/test.sh linux-debug
+bash scripts/check.sh
+```
+
+开发容器不会改变 `deploy/Dockerfile`、Compose 或生产运行镜像。退出开发容器后，宿主
+仍可使用相同 Preset 和脚本；若同一工作区的 CMake 缓存记录了另一环境的 vcpkg 路径，
+`scripts/build.sh` 会按现有逻辑刷新对应预设的缓存。容器只增加 GDB 所需的
+`SYS_PTRACE` capability，不放开 Docker socket 或其他宿主资源。容器内 `build/`
+使用可执行的临时文件系统，避免复用宿主 CMake 缓存；容器停止后需重新构建。
+
 ## 配置
 
 程序只读取下列环境变量；`.env.example` 是示例，不会自动加载。

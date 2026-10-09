@@ -1,0 +1,34 @@
+{
+  "name": "ApiGate C++ Development",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/api-gate,type=bind",
+  "workspaceFolder": "/workspaces/api-gate",
+  "containerUser": "vscode",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "capAdd": [
+    "SYS_PTRACE"
+  ],
+  "runArgs": [
+    "--tmpfs",
+    "/workspaces/api-gate/build:exec,mode=1777"
+  ],
+  "postCreateCommand": "bash scripts/install-deps.sh",
+  "waitFor": "postCreateCommand",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools"
+      ],
+      "settings": {
+        "cmake.useCMakePresets": "always",
+        "cmake.configureOnOpen": false,
+        "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
+      }
+    }
+  }
+}
