@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -162,6 +163,21 @@ constexpr std::size_t max_requests_per_connection = 100;
 constexpr auto request_timeout = std::chrono::seconds{10};
 constexpr auto accept_retry_delay = std::chrono::milliseconds{100};
 
+[[nodiscard]] std::string_view proxy_method_name(http::verb method) noexcept {
+    switch (method) {
+        case http::verb::get:
+            return "GET";
+        case http::verb::post:
+            return "POST";
+        case http::verb::put:
+            return "PUT";
+        case http::verb::patch:
+            return "PATCH";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 void write_fallback_diagnostic(const char* event, int error_code) noexcept {
     if (std::fprintf(stderr, R"({"level":"error","payload":{"event":"%s","error_code":%d}}%c)",
                      event, error_code, 10) < 0) {
@@ -223,43 +239,96 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
 
         parser_.emplace();
         parser_->header_limit(max_header_bytes);
-        parser_->body_limit(max_body_bytes);
+        // Inspect Expect before applying the payload limit so a client waiting for
+        // 100-continue receives the promised 417 without sending its body.
+        parser_->body_limit(std::numeric_limits<std::uint64_t>::max());
         stream_.expires_after(request_timeout);
-        http::async_read(stream_, buffer_, *parser_,
-                         [self = shared_from_this()](const boost::system::error_code& error,
-                                                     std::size_t) { self->on_read(error); });
+        http::async_read_header(
+            stream_, buffer_, *parser_,
+            [self = shared_from_this()](const boost::system::error_code& error, std::size_t) {
+                self->on_read_header(error);
+            });
     }
 
-    void on_read(const boost::system::error_code& error) {
+    void on_read_header(const boost::system::error_code& error) {
         if (finished_) {
             return;
         }
-        if (!error) {
-            if (!parser_.has_value()) {
-                logger_.error("http_parser_state_invalid");
-                close_socket();
-                return;
-            }
-            ++requests_served_;
-            const auto& request = parser_.value().get();
-            if (should_proxy_http_request(config_, request)) {
-                start_proxy_request(request);
-                return;
-            }
-            auto response = handle_http_request(config_, request);
-            if (requests_served_ >= max_requests_per_connection) {
-                response.keep_alive(false);
-            }
-
-            const std::string_view target{request.target().data(), request.target().size()};
-            const std::string method{request.method_string().data(),
-                                     request.method_string().size()};
-            const std::string route{classify_http_route(target)};
-            log_request_completed(method, route, response.result_int());
-            write_response(std::move(response));
+        if (error) {
+            handle_read_error(error);
+            return;
+        }
+        if (!parser_.has_value()) {
+            logger_.error("http_parser_state_invalid");
+            close_socket();
             return;
         }
 
+        const auto& request = parser_->get();
+        const auto [expect_begin, expect_end] = request.equal_range(http::field::expect);
+        for (auto expect = expect_begin; expect != expect_end; ++expect) {
+            if (!expect->value().empty()) {
+                write_protocol_error(http::status::expectation_failed, "expectation_failed",
+                                     "Expect is not supported");
+                return;
+            }
+        }
+        const auto content_length = parser_->content_length();
+        if (content_length && *content_length > max_body_bytes) {
+            write_protocol_error(http::status::payload_too_large, "payload_too_large",
+                                 "request body is too large");
+            return;
+        }
+
+        parser_->body_limit(max_body_bytes);
+        if (parser_->is_done()) {
+            process_request();
+            return;
+        }
+
+        http::async_read(
+            stream_, buffer_, *parser_,
+            [self = shared_from_this()](const boost::system::error_code& body_error, std::size_t) {
+                self->on_read_body(body_error);
+            });
+    }
+
+    void on_read_body(const boost::system::error_code& error) {
+        if (finished_) {
+            return;
+        }
+        if (error) {
+            handle_read_error(error);
+            return;
+        }
+        process_request();
+    }
+
+    void process_request() {
+        if (!parser_.has_value()) {
+            logger_.error("http_parser_state_invalid");
+            close_socket();
+            return;
+        }
+        ++requests_served_;
+        const auto& request = parser_->get();
+        if (should_proxy_http_request(config_, request)) {
+            start_proxy_request(request);
+            return;
+        }
+        auto response = handle_http_request(config_, request);
+        if (requests_served_ >= max_requests_per_connection) {
+            response.keep_alive(false);
+        }
+
+        const std::string_view target{request.target().data(), request.target().size()};
+        const std::string method{request.method_string().data(), request.method_string().size()};
+        const std::string route{classify_http_route(target)};
+        log_request_completed(method, route, response.result_int());
+        write_response(std::move(response));
+    }
+
+    void handle_read_error(const boost::system::error_code& error) {
         if (error == http::error::end_of_stream || error == asio::error::operation_aborted) {
             close_socket();
             return;
@@ -298,6 +367,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
 
     void start_proxy_request(const HttpRequest& request) noexcept {
         std::shared_ptr<HttpProxyExchange> exchange;
+        const auto method = request.method();
         try {
             if (!config_.upstream.has_value()) {
                 throw std::logic_error{"proxy request requires upstream configuration"};
@@ -310,15 +380,15 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
                     response.keep_alive(false);
                 }
                 log_proxy_capacity_rejection(response.result_int());
-                log_request_completed("GET", "proxy", response.result_int());
+                log_request_completed(proxy_method_name(method), "proxy", response.result_int());
                 write_response(std::move(response));
                 return;
             }
             exchange = std::make_shared<HttpProxyExchange>(
                 stream_.get_executor(), config_.upstream.value(), request,
-                [weak_self = weak_from_this()](ProxyResult result) noexcept {
+                [weak_self = weak_from_this(), method](ProxyResult result) noexcept {
                     if (const auto self = weak_self.lock()) {
-                        self->on_proxy_complete(std::move(result));
+                        self->on_proxy_complete(method, std::move(result));
                     }
                 },
                 [weak_self = weak_from_this()]() noexcept {
@@ -338,7 +408,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
                 auto response = make_gateway_error_response(request, GatewayFailure::bad_gateway);
                 log_proxy_failure(ProxyFailure{ProxyFailureStage::connect, 0},
                                   response.result_int());
-                log_request_completed("GET", "proxy", response.result_int());
+                log_request_completed(proxy_method_name(method), "proxy", response.result_int());
                 write_response(std::move(response));
             } catch (...) {
                 write_fallback_diagnostic("http_proxy_start_failed", 0);
@@ -347,7 +417,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         }
     }
 
-    void on_proxy_complete(ProxyResult result) noexcept {
+    void on_proxy_complete(http::verb method, ProxyResult result) noexcept {
         try {
             proxy_exchange_.reset();
             proxy_permit_.reset();
@@ -360,7 +430,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
             if (result.failure) {
                 log_proxy_failure(*result.failure, result.response.result_int());
             }
-            log_request_completed("GET", "proxy", result.response.result_int());
+            log_request_completed(proxy_method_name(method), "proxy", result.response.result_int());
             write_response(std::move(result.response));
         } catch (...) {
             write_fallback_diagnostic("http_proxy_completion_failed", 0);

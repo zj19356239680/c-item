@@ -16,6 +16,7 @@ from http_server_test import (
     ServiceProcess,
     assert_event_absent,
     assert_normal_log_output,
+    assert_peer_closed,
     assert_sensitive_values_absent,
     build_test_environment,
     read_json_response,
@@ -23,6 +24,7 @@ from http_server_test import (
 
 
 MAX_UPSTREAM_BODY = 1024 * 1024
+MAX_DOWNSTREAM_BODY = 64 * 1024
 
 
 class UpstreamState:
@@ -33,13 +35,18 @@ class UpstreamState:
         self._request_count = 0
         self._lock = threading.Lock()
 
-    def record(self, handler):
+    def record(self, handler, body):
         with self._lock:
             self._request_count += 1
         self.requests.put(
             {
+                "method": handler.command,
                 "path": handler.path,
+                "body": body,
                 "host": handler.headers.get("Host"),
+                "content_type": handler.headers.get("Content-Type"),
+                "content_length": handler.headers.get("Content-Length"),
+                "transfer_encoding": handler.headers.get("Transfer-Encoding"),
                 "authorization": handler.headers.get("Authorization"),
                 "cookie": handler.headers.get("Cookie"),
                 "removed": handler.headers.get("X-Remove"),
@@ -59,9 +66,11 @@ class ControlledUpstreamHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, unused_format, *unused_args):
         pass
 
-    def do_GET(self):
+    def _handle_request(self):
         state = self.server.state
-        state.record(self)
+        content_length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(content_length)
+        state.record(self, body)
         route = self.path.split("?", 1)[0]
         if route == "/informational-100":
             self.close_connection = True
@@ -99,6 +108,18 @@ class ControlledUpstreamHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def do_GET(self):
+        self._handle_request()
+
+    def do_POST(self):
+        self._handle_request()
+
+    def do_PUT(self):
+        self._handle_request()
+
+    def do_PATCH(self):
+        self._handle_request()
 
     def _send_response(self, status, body):
         self.send_response(status)
@@ -154,6 +175,23 @@ def stop_service(service):
     service.wait_for_event("service_stopped")
 
 
+def get_json_response(connection):
+    response = connection.getresponse()
+    payload = json.loads(response.read())
+    return response, payload
+
+
+def send_chunked_json_request(connection, method, path, chunks, headers=None):
+    connection.request(
+        method,
+        path,
+        body=chunks,
+        headers=headers or {},
+        encode_chunked=True,
+    )
+    return get_json_response(connection)
+
+
 def test_proxy_success_and_security(binary):
     upstream = ControlledUpstream()
     upstream.start()
@@ -202,7 +240,7 @@ def test_proxy_success_and_security(binary):
         assert ready.status == 200 and ready_body["status"] == "ready"
         assert upstream.state.request_count() == 1
 
-        method, method_body = read_json_response(connection, "POST", "/resource", body=b"")
+        method, method_body = read_json_response(connection, "POST", "/healthz", body=b"")
         assert method.status == 405
         assert method_body["error"]["code"] == "method_not_allowed"
 
@@ -222,6 +260,12 @@ def test_proxy_success_and_security(binary):
         )
         assert upgrade.status == 400
         assert upgrade_error["error"]["code"] == "unsupported_request"
+        unsupported, unsupported_error = read_json_response(
+            connection, "DELETE", "/resource"
+        )
+        assert unsupported.status == 405
+        assert unsupported.getheader("Allow") == "GET, POST, PUT, PATCH"
+        assert unsupported_error["error"]["code"] == "method_not_allowed"
         assert upstream.state.request_count() == 1
 
         connection.close()
@@ -252,6 +296,212 @@ def test_proxy_success_and_security(binary):
         upstream.close()
 
 
+def test_body_methods_limits_and_expectation(binary):
+    upstream = ControlledUpstream()
+    upstream.start()
+    service = ServiceProcess(binary, proxy_environment(upstream.port))
+    connection = None
+    body_marker = "proxy-body-" + secrets.token_hex(16)
+    query_marker = "proxy-body-query-" + secrets.token_hex(16)
+    authorization_marker = "proxy-body-authorization-" + secrets.token_hex(16)
+    cookie_marker = "proxy-body-cookie-" + secrets.token_hex(16)
+    try:
+        port = int(service.wait_for_event("http_listener_started")["port"])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+
+        expected_methods = []
+        for method in ("POST", "PUT", "PATCH"):
+            for request_body in (b"", (method + "=" + body_marker).encode()):
+                path = f"/body/{method.lower()}?credential={query_marker}"
+                response, response_body = read_json_response(
+                    connection,
+                    method,
+                    path,
+                    body=request_body,
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "Authorization": "Bearer " + authorization_marker,
+                        "Cookie": "session=" + cookie_marker,
+                    },
+                )
+                assert response.status == 201
+                assert response_body == {"upstream": "ok"}
+                observed = upstream.state.requests.get(timeout=3)
+                assert observed["method"] == method
+                assert observed["path"] == path
+                assert observed["body"] == request_body
+                assert observed["content_type"] == "application/octet-stream"
+                assert observed["content_length"] == str(len(request_body))
+                assert observed["transfer_encoding"] is None
+                assert observed["host"] == f"127.0.0.1:{upstream.port}"
+                expected_methods.append(method)
+
+        chunked_body = ("chunked=" + body_marker).encode()
+        chunked, chunked_response = send_chunked_json_request(
+            connection,
+            "PATCH",
+            "/body/chunked?credential=" + query_marker,
+            [chunked_body[:7], chunked_body[7:]],
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert chunked.status == 201
+        assert chunked_response == {"upstream": "ok"}
+        observed = upstream.state.requests.get(timeout=3)
+        assert observed["method"] == "PATCH"
+        assert observed["body"] == chunked_body
+        assert observed["content_length"] == str(len(chunked_body))
+        assert observed["transfer_encoding"] is None
+        expected_methods.append("PATCH")
+
+        maximum_body = b"m" * MAX_DOWNSTREAM_BODY
+        maximum, maximum_response = read_json_response(
+            connection,
+            "PUT",
+            "/body/maximum",
+            body=maximum_body,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert maximum.status == 201
+        assert maximum_response == {"upstream": "ok"}
+        observed = upstream.state.requests.get(timeout=3)
+        assert observed["method"] == "PUT"
+        assert observed["body"] == maximum_body
+        assert observed["content_length"] == str(MAX_DOWNSTREAM_BODY)
+        expected_methods.append("PUT")
+
+        before_oversized = upstream.state.request_count()
+        connection.close()
+        connection = None
+        with socket.create_connection(("127.0.0.1", port), timeout=3) as oversized_client:
+            oversized_client.sendall(
+                b"POST /body/oversized HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Content-Type: application/octet-stream\r\n"
+                + f"Content-Length: {MAX_DOWNSTREAM_BODY + 1}\r\n".encode("ascii")
+                + b"Connection: keep-alive\r\n\r\n"
+            )
+            oversized = http.client.HTTPResponse(oversized_client)
+            oversized.begin()
+            oversized_body = json.loads(oversized.read())
+            assert oversized.status == 413
+            assert oversized_body == {
+                "error": {
+                    "code": "payload_too_large",
+                    "message": "request body is too large",
+                }
+            }
+        assert upstream.state.request_count() == before_oversized
+
+        chunked_oversized_connection = http.client.HTTPConnection(
+            "127.0.0.1", port, timeout=3
+        )
+        try:
+            chunked_oversized, chunked_oversized_body = send_chunked_json_request(
+                chunked_oversized_connection,
+                "PATCH",
+                "/body/chunked-oversized",
+                [
+                    b"x" * (MAX_DOWNSTREAM_BODY // 2),
+                    b"y" * (MAX_DOWNSTREAM_BODY // 2 + 1),
+                ],
+                headers={"Content-Type": "application/octet-stream"},
+            )
+            assert chunked_oversized.status == 413
+            assert chunked_oversized_body["error"]["code"] == "payload_too_large"
+        finally:
+            chunked_oversized_connection.close()
+        assert upstream.state.request_count() == before_oversized
+
+        with socket.create_connection(("127.0.0.1", port), timeout=3) as expect_client:
+            expect_client.sendall(
+                b"POST /body/expect HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Content-Type: application/octet-stream\r\n"
+                b"Content-Length: 32\r\n"
+                b"Expect: 100-continue\r\n"
+                b"Connection: keep-alive\r\n\r\n"
+            )
+            expectation = http.client.HTTPResponse(expect_client)
+            expectation.begin()
+            expectation_body = json.loads(expectation.read())
+            assert expectation.status == 417
+            assert expectation_body == {
+                "error": {
+                    "code": "expectation_failed",
+                    "message": "Expect is not supported",
+                }
+            }
+            assert expectation.getheader("Content-Type") == "application/json"
+            assert expectation.getheader("Cache-Control") == "no-store"
+            assert expectation.getheader("Server") == "ApiGate"
+            assert expectation.will_close
+            assert_peer_closed(expect_client, timeout=1)
+        assert upstream.state.request_count() == before_oversized
+
+        with socket.create_connection(("127.0.0.1", port), timeout=3) as expect_client:
+            expect_client.sendall(
+                b"POST /body/repeated-expect HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Content-Type: application/octet-stream\r\n"
+                b"Content-Length: 32\r\n"
+                b"Expect:\r\n"
+                b"Expect: 100-continue\r\n"
+                b"Connection: keep-alive\r\n\r\n"
+            )
+            expectation = http.client.HTTPResponse(expect_client)
+            expectation.begin()
+            expectation_body = json.loads(expectation.read())
+            assert expectation.status == 417
+            assert expectation_body == {
+                "error": {
+                    "code": "expectation_failed",
+                    "message": "Expect is not supported",
+                }
+            }
+            assert expectation.getheader("Content-Type") == "application/json"
+            assert expectation.getheader("Cache-Control") == "no-store"
+            assert expectation.getheader("Server") == "ApiGate"
+            assert expectation.will_close
+            assert_peer_closed(expect_client, timeout=1)
+        assert upstream.state.request_count() == before_oversized
+
+        health_connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        try:
+            health, health_body = read_json_response(health_connection, "GET", "/healthz")
+            ready, ready_body = read_json_response(health_connection, "GET", "/readyz")
+            assert health.status == 200 and health_body["status"] == "ok"
+            assert ready.status == 200 and ready_body["status"] == "ready"
+        finally:
+            health_connection.close()
+        assert upstream.state.request_count() == before_oversized
+
+        stop_service(service)
+        output = "".join(service.lines)
+        records = assert_normal_log_output(output)
+        completed_methods = [
+            record["payload"].get("method")
+            for record in records
+            if record["payload"].get("event") == "http_request_completed"
+            and record["payload"].get("route") == "proxy"
+        ]
+        assert completed_methods == expected_methods
+        assert_sensitive_values_absent(
+            output,
+            {
+                "query": query_marker,
+                "authorization": authorization_marker,
+                "cookie": cookie_marker,
+                "body": body_marker,
+                "expect": "100-continue",
+            },
+        )
+    finally:
+        if connection is not None:
+            connection.close()
+        service.cleanup()
+        upstream.close()
+
+
 def test_proxy_failures_are_bounded_and_service_survives(binary):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as unavailable:
         unavailable.bind(("127.0.0.1", 0))
@@ -260,11 +510,13 @@ def test_proxy_failures_are_bounded_and_service_survives(binary):
         try:
             port = int(service.wait_for_event("http_listener_started")["port"])
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
-            failed, failed_body = read_json_response(connection, "GET", "/unavailable")
+            failed, failed_body = read_json_response(
+                connection, "POST", "/unavailable", body=b"bounded-request"
+            )
             assert failed.status == 502
             assert failed_body["error"]["code"] == "bad_gateway"
             failed_again, failed_again_body = read_json_response(
-                connection, "GET", "/still-unavailable"
+                connection, "PUT", "/still-unavailable", body=b"bounded-request"
             )
             assert failed_again.status == 502
             assert failed_again_body["error"]["code"] == "bad_gateway"
@@ -282,18 +534,27 @@ def test_proxy_failures_are_bounded_and_service_survives(binary):
     try:
         port = int(service.wait_for_event("http_listener_started")["port"])
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
-        timed_out, timeout_body = read_json_response(connection, "GET", "/blocked")
+        timed_out, timeout_body = read_json_response(
+            connection, "POST", "/blocked", body=b"bounded-request"
+        )
         assert upstream.state.block_started.is_set()
         assert timed_out.status == 504
         assert timeout_body["error"]["code"] == "gateway_timeout"
         upstream.state.release_block.set()
 
-        too_large, large_body = read_json_response(connection, "GET", "/large")
+        too_large, large_body = read_json_response(
+            connection, "PATCH", "/large", body=b"bounded-request"
+        )
         assert too_large.status == 502
         assert large_body["error"]["code"] == "bad_gateway"
+        recovered, recovered_body = read_json_response(
+            connection, "PUT", "/after-failures", body=b"bounded-request"
+        )
+        assert recovered.status == 201
+        assert recovered_body == {"upstream": "ok"}
         health, health_body = read_json_response(connection, "GET", "/healthz")
         assert health.status == 200 and health_body["status"] == "ok"
-        assert upstream.state.request_count() == 2
+        assert upstream.state.request_count() == 3
         connection.close()
         stop_service(service)
         records = assert_normal_log_output("".join(service.lines))
@@ -363,7 +624,9 @@ def test_proxy_capacity_rejects_without_visiting_upstream(binary):
         def request_blocked():
             connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             try:
-                response, body = read_json_response(connection, "GET", "/blocked")
+                response, body = read_json_response(
+                    connection, "POST", "/blocked", body=b"held-body"
+                )
                 blocked_result.put((response.status, body))
             except (ConnectionError, http.client.HTTPException, socket.timeout) as error:
                 blocked_result.put(error)
@@ -376,48 +639,42 @@ def test_proxy_capacity_rejects_without_visiting_upstream(binary):
         assert upstream.state.request_count() == 1
 
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
-        rejected, rejected_body = read_json_response(
-            connection,
-            "GET",
-            "/rejected?credential=" + query_marker,
-            headers={
-                "Authorization": "Bearer " + authorization_marker,
-                "Cookie": "session=" + cookie_marker,
-            },
-        )
-        assert rejected.status == 503
-        assert rejected_body == {
-            "error": {
-                "code": "gateway_overloaded",
-                "message": "proxy capacity is exhausted",
+        for method in ("POST", "PUT", "PATCH"):
+            rejected, rejected_body = read_json_response(
+                connection,
+                method,
+                "/rejected?credential=" + query_marker,
+                body="payload=" + body_marker,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Authorization": "Bearer " + authorization_marker,
+                    "Cookie": "session=" + cookie_marker,
+                },
+            )
+            assert rejected.status == 503
+            assert rejected_body == {
+                "error": {
+                    "code": "gateway_overloaded",
+                    "message": "proxy capacity is exhausted",
+                }
             }
-        }
-        assert rejected.getheader("Content-Type") == "application/json"
-        assert rejected.getheader("Cache-Control") == "no-store"
-        assert rejected.getheader("Server") == "ApiGate"
-        assert rejected.getheader("Retry-After") is None
-        assert upstream.state.request_count() == 1
+            assert rejected.getheader("Content-Type") == "application/json"
+            assert rejected.getheader("Cache-Control") == "no-store"
+            assert rejected.getheader("Server") == "ApiGate"
+            assert rejected.getheader("Retry-After") is None
+            assert upstream.state.request_count() == 1
 
         health, health_body = read_json_response(connection, "GET", "/healthz")
         assert health.status == 200 and health_body["status"] == "ok"
-        method, method_body = read_json_response(
-            connection,
-            "POST",
-            "/rejected",
-            body="payload=" + body_marker,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        assert method.status == 405
-        assert method_body["error"]["code"] == "method_not_allowed"
-        assert upstream.state.request_count() == 1
-
         upstream.state.release_block.set()
         blocked_client.join(timeout=5)
         assert not blocked_client.is_alive(), "blocked proxy client did not finish"
         first_result = blocked_result.get(timeout=1)
         assert first_result == (200, {"upstream": "released"})
 
-        accepted, accepted_body = read_json_response(connection, "GET", "/accepted")
+        accepted, accepted_body = read_json_response(
+            connection, "PATCH", "/accepted", body=b"accepted-body"
+        )
         assert accepted.status == 201
         assert accepted_body == {"upstream": "ok"}
         assert upstream.state.request_count() == 2
@@ -441,7 +698,7 @@ def test_proxy_capacity_rejects_without_visiting_upstream(binary):
                 "max_proxies": 1,
                 "status": 503,
             }
-        ]
+        ] * 3
         completed_503 = [
             record
             for record in records
@@ -449,7 +706,11 @@ def test_proxy_capacity_rejects_without_visiting_upstream(binary):
             and record["payload"].get("route") == "proxy"
             and record["payload"].get("status") == 503
         ]
-        assert len(completed_503) == 1
+        assert [record["payload"]["method"] for record in completed_503] == [
+            "POST",
+            "PUT",
+            "PATCH",
+        ]
         assert_sensitive_values_absent(
             output,
             {
@@ -482,7 +743,7 @@ def test_shutdown_cancels_active_proxy_without_gateway_noise(binary):
             def request_blocked():
                 connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
                 try:
-                    connection.request("GET", "/blocked")
+                    connection.request("PATCH", "/blocked", body=b"shutdown-body")
                     response = connection.getresponse()
                     response.read()
                     client_done.put("response")
@@ -542,6 +803,7 @@ def main():
     binary = os.path.abspath(sys.argv[1])
     test_config_check_hides_upstream_host(binary)
     test_proxy_success_and_security(binary)
+    test_body_methods_limits_and_expectation(binary)
     test_proxy_failures_are_bounded_and_service_survives(binary)
     test_informational_responses_are_rejected(binary)
     test_proxy_capacity_rejects_without_visiting_upstream(binary)

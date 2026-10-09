@@ -49,6 +49,40 @@ TEST(HttpProxyTest, FiltersRequestHopByHopHeadersAndPreservesEndToEndHeaders) {
     EXPECT_TRUE(upstream.body().empty());
 }
 
+TEST(HttpProxyTest, PreservesBodyMethodAndPayloadWithRegeneratedLength) {
+    const apigate::UpstreamConfig config{"upstream.internal", 8080, 3000};
+    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch}) {
+        auto request = make_request();
+        request.method(method);
+        request.set(http::field::content_type, "application/octet-stream");
+        request.set(http::field::transfer_encoding, "chunked");
+        request.body() = "forwarded-payload";
+
+        const auto upstream = apigate::detail::make_upstream_request(config, request);
+
+        EXPECT_EQ(upstream.method(), method);
+        EXPECT_EQ(upstream.target(), request.target());
+        EXPECT_EQ(upstream.body(), request.body());
+        EXPECT_EQ(upstream[http::field::content_type], "application/octet-stream");
+        EXPECT_EQ(upstream[http::field::content_length], std::to_string(request.body().size()));
+        EXPECT_EQ(upstream.find(http::field::transfer_encoding), upstream.end());
+    }
+}
+
+TEST(HttpProxyTest, RegeneratesZeroLengthForEmptyBodyMethods) {
+    const apigate::UpstreamConfig config{"upstream.internal", 8080, 3000};
+    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch}) {
+        auto request = make_request();
+        request.method(method);
+
+        const auto upstream = apigate::detail::make_upstream_request(config, request);
+
+        EXPECT_EQ(upstream.method(), method);
+        EXPECT_TRUE(upstream.body().empty());
+        EXPECT_EQ(upstream[http::field::content_length], "0");
+    }
+}
+
 TEST(HttpProxyTest, FiltersResponseHopByHopHeadersAndOverridesServer) {
     const auto request = make_request();
     apigate::HttpResponse upstream{http::status::created, 11};

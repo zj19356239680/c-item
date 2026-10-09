@@ -23,6 +23,11 @@ namespace http = boost::beast::http;
     return request.find(http::field::upgrade) != request.end();
 }
 
+[[nodiscard]] bool is_supported_proxy_method(http::verb method) noexcept {
+    return method == http::verb::get || method == http::verb::post || method == http::verb::put ||
+           method == http::verb::patch;
+}
+
 [[nodiscard]] HttpResponse make_json_response(const HttpRequest& request, http::status status,
                                               const nlohmann::json& body) {
     HttpResponse response{status, request.version()};
@@ -32,6 +37,17 @@ namespace http = boost::beast::http;
     response.keep_alive(request.keep_alive());
     response.body() = body.dump();
     response.prepare_payload();
+    return response;
+}
+
+[[nodiscard]] HttpResponse make_method_not_allowed(const HttpRequest& request, bool proxy_enabled) {
+    const std::string_view allowed = proxy_enabled ? "GET, POST, PUT, PATCH" : "GET";
+    const std::string_view message =
+        proxy_enabled ? "method is not supported" : "only GET is supported";
+    auto response =
+        make_json_response(request, http::status::method_not_allowed,
+                           {{"error", {{"code", "method_not_allowed"}, {"message", message}}}});
+    response.set(http::field::allow, allowed);
     return response;
 }
 
@@ -49,7 +65,7 @@ std::string_view classify_http_route(std::string_view target) noexcept {
 }
 
 bool should_proxy_http_request(const AppConfig& config, const HttpRequest& request) noexcept {
-    if (!config.upstream || request.method() != http::verb::get) {
+    if (!config.upstream || !is_supported_proxy_method(request.method())) {
         return false;
     }
     const std::string_view target{request.target().data(), request.target().size()};
@@ -57,27 +73,24 @@ bool should_proxy_http_request(const AppConfig& config, const HttpRequest& reque
         return false;
     }
     return is_supported_proxy_target(target) && !requests_upgrade(request) &&
-           request.body().empty();
+           (request.method() != http::verb::get || request.body().empty());
 }
 
 HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& request) {
-    if (request.method() != http::verb::get) {
-        auto response = make_json_response(
-            request, http::status::method_not_allowed,
-            {{"error", {{"code", "method_not_allowed"}, {"message", "only GET is supported"}}}});
-        response.set(http::field::allow, "GET");
-        return response;
+    const std::string_view target{request.target().data(), request.target().size()};
+    const auto route = classify_http_route(target);
+    if (route != "unmatched" && request.method() != http::verb::get) {
+        return make_method_not_allowed(request, false);
     }
-
+    if (!is_supported_proxy_method(request.method())) {
+        return make_method_not_allowed(request, config.upstream.has_value());
+    }
     if (config.upstream && requests_upgrade(request)) {
         return make_json_response(
             request, http::status::bad_request,
             {{"error",
               {{"code", "unsupported_request"}, {"message", "request cannot be proxied"}}}});
     }
-
-    const std::string_view target{request.target().data(), request.target().size()};
-    const auto route = classify_http_route(target);
     if (route == "healthz") {
         return make_json_response(request, http::status::ok,
                                   {{"status", "ok"}, {"service", config.service_name}});
@@ -86,7 +99,11 @@ HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& req
         return make_json_response(request, http::status::ok,
                                   {{"status", "ready"}, {"service", config.service_name}});
     }
-    if (config.upstream && (!is_supported_proxy_target(target) || !request.body().empty())) {
+    if (!config.upstream && request.method() != http::verb::get) {
+        return make_method_not_allowed(request, false);
+    }
+    if (config.upstream && (!is_supported_proxy_target(target) ||
+                            (request.method() == http::verb::get && !request.body().empty()))) {
         return make_json_response(
             request, http::status::bad_request,
             {{"error",

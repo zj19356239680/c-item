@@ -133,7 +133,7 @@ std::string make_upstream_authority(std::string_view host, std::uint16_t port) {
 }
 
 HttpRequest make_upstream_request(const UpstreamConfig& config, const HttpRequest& request) {
-    HttpRequest upstream{http::verb::get, request.target(), 11};
+    HttpRequest upstream{request.method(), request.target(), 11};
     const auto dynamic_tokens = connection_tokens(request.base());
     for (const auto& field : request.base()) {
         const std::string_view name{field.name_string().data(), field.name_string().size()};
@@ -146,7 +146,12 @@ HttpRequest make_upstream_request(const UpstreamConfig& config, const HttpReques
     }
     upstream.set(http::field::host, make_upstream_authority(config.host, config.port));
     upstream.set(http::field::connection, "close");
-    upstream.body().clear();
+    upstream.body() = request.body();
+    if (request.method() != http::verb::get) {
+        upstream.content_length(upstream.body().size());
+    } else if (!request.body().empty()) {
+        upstream.prepare_payload();
+    }
     return upstream;
 }
 

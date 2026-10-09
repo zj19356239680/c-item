@@ -88,15 +88,22 @@ TEST(HttpHandlerTest, KeepsHealthRoutesLocalWhenProxyIsEnabled) {
         http::status::ok);
 }
 
-TEST(HttpHandlerTest, ProxiesOnlySupportedUnmatchedGetRequests) {
+TEST(HttpHandlerTest, ProxiesSupportedMethodsOnUnmatchedRoutes) {
     const auto config = proxy_config();
     auto proxy_request = make_request(http::verb::get, "/resource?key=value");
 
     EXPECT_TRUE(apigate::should_proxy_http_request(config, proxy_request));
+    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch}) {
+        auto body_request = make_request(method, "/resource?key=value");
+        EXPECT_TRUE(apigate::should_proxy_http_request(config, body_request));
+        body_request.body() = "bounded-body";
+        body_request.prepare_payload();
+        EXPECT_TRUE(apigate::should_proxy_http_request(config, body_request));
+    }
     EXPECT_FALSE(apigate::should_proxy_http_request(apigate::AppConfig{},
                                                     make_request(http::verb::get, "/resource")));
     EXPECT_FALSE(
-        apigate::should_proxy_http_request(config, make_request(http::verb::post, "/resource")));
+        apigate::should_proxy_http_request(config, make_request(http::verb::delete_, "/resource")));
 
     proxy_request.body() = "not-forwarded";
     proxy_request.prepare_payload();
@@ -105,6 +112,39 @@ TEST(HttpHandlerTest, ProxiesOnlySupportedUnmatchedGetRequests) {
     EXPECT_EQ(body_error.result(), http::status::bad_request);
     EXPECT_EQ(nlohmann::json::parse(body_error.body()).at("error").at("code"),
               "unsupported_request");
+}
+
+TEST(HttpHandlerTest, KeepsBodyMethodsDisabledWithoutAnUpstream) {
+    const apigate::AppConfig config;
+    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch}) {
+        const auto response =
+            apigate::handle_http_request(config, make_request(method, "/resource"));
+        EXPECT_EQ(response.result(), http::status::method_not_allowed);
+        EXPECT_EQ(response[http::field::allow], "GET");
+    }
+}
+
+TEST(HttpHandlerTest, KeepsLocalRoutesGetOnlyWhenProxyIsEnabled) {
+    const auto config = proxy_config();
+    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch}) {
+        const auto request = make_request(method, "/healthz");
+        EXPECT_FALSE(apigate::should_proxy_http_request(config, request));
+        const auto response = apigate::handle_http_request(config, request);
+        EXPECT_EQ(response.result(), http::status::method_not_allowed);
+        EXPECT_EQ(response[http::field::allow], "GET");
+    }
+}
+
+TEST(HttpHandlerTest, RejectsMethodsOutsideTheProxyMvp) {
+    const auto config = proxy_config();
+    for (const auto method :
+         {http::verb::head, http::verb::delete_, http::verb::options, http::verb::connect}) {
+        const auto request = make_request(method, "/resource");
+        EXPECT_FALSE(apigate::should_proxy_http_request(config, request));
+        const auto response = apigate::handle_http_request(config, request);
+        EXPECT_EQ(response.result(), http::status::method_not_allowed);
+        EXPECT_EQ(response[http::field::allow], "GET, POST, PUT, PATCH");
+    }
 }
 
 TEST(HttpHandlerTest, RejectsUnsupportedProxyTargetAndUpgrade) {

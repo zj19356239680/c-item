@@ -1,9 +1,10 @@
 # ApiGate
 
 ApiGate 是一个用于学习和逐步开发 API 网关的 C++20 项目。当前版本提供异步
-HTTP/1.1 健康检查、配置校验、JSON 日志，以及可选的单一静态 HTTP 上游 GET 代理。
-它没有多上游、请求体代理、重试、连接池、缓存、限流、认证、TLS 或 HTTP/2；不要把
-它当作生产网关。本项目在 Linux 环境下开发，仅支持 Linux 构建与运行。
+HTTP/1.1 健康检查、配置校验、JSON 日志，以及可选的单一静态 HTTP 上游代理。
+代理支持 GET 及有界正文的 POST、PUT、PATCH。它没有多上游、流式上传、重试、连接池、
+缓存、限流、认证、TLS 或 HTTP/2；不要把它当作生产网关。本项目在 Linux 环境下开发，
+仅支持 Linux 构建与运行。
 
 ## 快速启动与验证
 
@@ -56,27 +57,33 @@ curl -fsS http://127.0.0.1:8080/readyz
 | `GET /missing` | 404 | `{"error":{"code":"not_found","message":"route not found"}}` |
 | `POST /healthz` | 405 | `{"error":{"code":"method_not_allowed","message":"only GET is supported"}}`；`Allow: GET` |
 
-表中服务名使用默认配置。路由匹配时忽略查询字符串；任意非 `GET` 方法都返回
-405，即使路径未知。正常响应设置 `Server: ApiGate`、
+表中服务名使用默认配置。路由匹配时忽略查询字符串；本地端点只接受 `GET`，代理关闭
+时 POST、PUT、PATCH 也继续返回 405。正常响应设置 `Server: ApiGate`、
 `Content-Type: application/json` 和 `Cache-Control: no-store`；
 正文长度及连接头由 HTTP 库按请求生成。请求头超过 8 KiB 返回 431，正文超过
 64 KiB 返回 413；格式错误请求可能返回 400 或直接断开。当前行为尚未制定版本化的
 API 兼容承诺，具体设计边界见[设计文档](设计文档.md)。
 
 同时设置 `APIGATE_UPSTREAM_HOST` 和 `APIGATE_UPSTREAM_PORT` 后，除
-`/healthz`、`/readyz` 外的 origin-form `GET` 会代理到该 HTTP 上游，原始路径和查询
-保持不变。代理只接受无正文 GET；带非空正文、absolute-form 或 Upgrade 的候选请求
-返回安全的 400 JSON。非 GET 仍返回 405。上游解析、连接、写入、读取、协议错误或
-响应超限返回 502，任一上游阶段超时返回 504；上游 1xx 信息响应（包括 101）也会被
+`/healthz`、`/readyz` 外的 origin-form GET、POST、PUT、PATCH 会代理到该 HTTP 上游，
+原始方法、路径和查询保持不变。GET 只允许空正文；POST、PUT、PATCH 允许空正文或最多
+64 KiB 的正文。absolute-form、Upgrade 或带正文 GET 返回安全的 400 JSON，HEAD、
+DELETE、OPTIONS、CONNECT 及其他方法返回 405。上游解析、连接、写入、读取、协议错误
+或响应超限返回 502，任一上游阶段超时返回 504；上游 1xx 信息响应（包括 101）也会被
 拒绝为 502，不继续读取后续响应或切换协议。错误正文不会包含上游地址、请求目标或
-系统错误文本。上游响应正文上限为 1 MiB，且每个请求都新建上游连接，不自动重试。
+系统错误文本。下游 Content-Length 与 chunked 正文都会先完整缓冲并按解析后的有效
+载荷限制为 64 KiB；超限返回 413 且不访问上游。当前不流式转发请求体。非空 `Expect`
+在读取正文前返回 417 `expectation_failed` 并关闭下游连接，不获取代理名额或访问上游。
+上游响应正文上限为 1 MiB，且每个请求都新建上游连接；所有方法均不自动重试，尤其
+不会重放带正文请求。
 并发代理达到 `APIGATE_MAX_CONCURRENT_PROXIES` 时，新代理候选不会访问上游，而是
 立即返回 503 和
 `{"error":{"code":"gateway_overloaded","message":"proxy capacity is exhausted"}}`；
 响应不设置 `Retry-After`，本地健康端点不占用代理名额。
 
 代理会移除请求和响应中的标准 hop-by-hop 头以及 `Connection` 动态列出的头，覆盖
-上游 `Host`，并将下游 `Server` 保持为 `ApiGate`。`Authorization`、`Cookie` 等
+上游 `Host`，按缓冲后的实际正文重建 `Content-Length`，并将下游 `Server` 保持为
+`ApiGate`。`Content-Type`、`Authorization`、`Cookie` 等
 端到端请求头会转发给所配置上游，但不会写入 ApiGate 日志。客户端提供的
 `X-Forwarded-*` 不会被信任或转发，本阶段也不生成这些头。启用代理不会改变本地
 健康端点；`/readyz` 仍不主动探测上游。
@@ -135,7 +142,7 @@ bash scripts/run.sh --version
 APIGATE_LISTEN_PORT=9000 bash scripts/run.sh
 ```
 
-例如，把未知 GET 转发到本机测试上游：
+例如，把支持的方法转发到本机测试上游：
 
 ```bash
 APIGATE_UPSTREAM_HOST=127.0.0.1 \
@@ -143,12 +150,14 @@ APIGATE_UPSTREAM_PORT=9001 \
 bash scripts/run.sh
 ```
 
-三项上游变量均未设置时代理关闭，原有未知 GET 的 404 行为保持不变。两项容量配置
+三项上游变量均未设置时代理关闭，原有未知 GET 的 404 及其他方法的 405 行为保持不变。两项容量配置
 始终校验；代理关闭时代理并发上限不被使用。配置检查结果会报告两个数值上限、
 `proxy_enabled` 和启用时的 `upstream_timeout_ms`，不会输出上游主机名。
 
-当前没有全局字节预算、每客户端/IP 限制或请求速率限制。实际可承载数量仍受文件
-描述符、内存、CPU、上游响应大小和操作系统 backlog 等因素约束。
+当前没有全局字节预算、每客户端/IP 限制或请求速率限制；也不支持其他代理方法、
+流式上传、连接池、多上游、上游 TLS、HTTP/2、WebSocket 或优雅排空。实际可承载数量
+仍受文件描述符、内存、CPU、请求/响应缓冲和操作系统 backlog 等因素约束。现有测试
+覆盖不构成生产容量或协议兼容性承诺。
 
 无效配置会在监听前失败并以非零状态退出。不要将密码或令牌写入
 `.env.example`、命令行或仓库；若自行创建 `.env`，该文件已被 Git 忽略。
