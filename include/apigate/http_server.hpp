@@ -14,7 +14,8 @@ class StructuredLogger;
 class HttpServer {
    public:
     HttpServer(boost::asio::io_context& io_context, const AppConfig& config,
-               StructuredLogger& logger, std::function<void()> on_runtime_failure);
+               StructuredLogger& logger, std::function<void()> on_runtime_failure,
+               std::function<void()> on_drain_complete);
     ~HttpServer();
 
     HttpServer(const HttpServer&) = delete;
@@ -23,6 +24,7 @@ class HttpServer {
     HttpServer& operator=(HttpServer&&) = delete;
 
     void start();
+    void begin_drain() noexcept;
     void stop() noexcept;
     [[nodiscard]] std::uint16_t bound_port() const noexcept;
 

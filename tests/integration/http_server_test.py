@@ -28,6 +28,7 @@ APIGATE_ENVIRONMENT_VARIABLES = (
     "APIGATE_LISTEN_PORT",
     "APIGATE_MAX_CONNECTIONS",
     "APIGATE_MAX_CONCURRENT_PROXIES",
+    "APIGATE_SHUTDOWN_GRACE_MS",
     "APIGATE_UPSTREAM_HOST",
     "APIGATE_UPSTREAM_PORT",
     "APIGATE_UPSTREAM_TIMEOUT_MS",
@@ -222,9 +223,9 @@ class ServiceProcess:
         assert not self.reader.is_alive(), "log reader did not finish"
         assert not self.invalid_logs, f"invalid structured logs: {self.invalid_logs!r}"
 
-    def terminate(self):
+    def terminate(self, shutdown_signal=signal.SIGTERM):
         if self.process.poll() is None:
-            self.process.send_signal(signal.SIGTERM)
+            self.process.send_signal(shutdown_signal)
 
     def cleanup(self):
         if self.process.poll() is None:
@@ -253,6 +254,38 @@ def assert_peer_closed(connection_socket, timeout):
     except socket.timeout as error:
         raise AssertionError("peer did not close the connection before the timeout") from error
     assert received == b"", f"expected EOF, received {received!r}"
+
+
+def assert_new_connection_not_served(port, timeout=0.5):
+    try:
+        candidate = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    except OSError:
+        return
+    with candidate:
+        try:
+            candidate.sendall(
+                b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            candidate.settimeout(timeout)
+            received = candidate.recv(4096)
+        except (ConnectionError, socket.timeout):
+            return
+        assert received == b"", "a new request was served after drain started"
+
+
+def assert_shutdown_sequence(output, terminal_event):
+    records = assert_normal_log_output(output)
+    events = [record["payload"]["event"] for record in records]
+    expected = [
+        "shutdown_signal_received",
+        "shutdown_drain_started",
+        terminal_event,
+        "service_stopped",
+    ]
+    positions = [events.index(event) for event in expected]
+    assert positions == sorted(positions), f"shutdown events out of order: {expected!r}"
+    assert events.count(terminal_event) == 1
+    return records
 
 
 def test_invalid_log_detection():
@@ -368,6 +401,7 @@ def test_command_line(binary, expected_version):
     assert "APIGATE_UPSTREAM_TIMEOUT_MS" in help_result.stdout
     assert "APIGATE_MAX_CONNECTIONS" in help_result.stdout
     assert "APIGATE_MAX_CONCURRENT_PROXIES" in help_result.stdout
+    assert "APIGATE_SHUTDOWN_GRACE_MS" in help_result.stdout
     assert not help_result.stderr
 
     for arguments in (
@@ -483,8 +517,13 @@ def test_http_and_shutdown(binary):
         assert service.process.wait(timeout=5) == 0
         service.finish_log_reader()
         service.wait_for_event("shutdown_signal_received")
+        service.wait_for_event("shutdown_drain_started")
         service.wait_for_event("http_listener_stopped")
+        service.wait_for_event("shutdown_drain_completed")
         service.wait_for_event("service_stopped")
+        output = "".join(service.lines)
+        assert_shutdown_sequence(output, "shutdown_drain_completed")
+        assert_event_absent(output, "shutdown_drain_timed_out")
     finally:
         service.cleanup()
 
@@ -532,7 +571,7 @@ def test_service_environment_isolation(binary):
 
 
 def test_active_keep_alive_shutdown(binary):
-    service = ServiceProcess(binary)
+    service = ServiceProcess(binary, {"APIGATE_SHUTDOWN_GRACE_MS": "3000"})
     connection = None
     try:
         listener_event = service.wait_for_event("http_listener_started")
@@ -545,18 +584,84 @@ def test_active_keep_alive_shutdown(binary):
         active_socket = connection.sock
         assert active_socket is not None
 
+        started_at = time.monotonic()
         service.terminate()
         assert service.process.wait(timeout=5) == 0
+        assert time.monotonic() - started_at < 2.0
         assert_peer_closed(active_socket, timeout=1)
         service.finish_log_reader()
         service.wait_for_event("shutdown_signal_received")
+        drain_started = service.wait_for_event("shutdown_drain_started")
+        assert drain_started["active_sessions"] == 1
+        assert drain_started["grace_ms"] == 3000
         service.wait_for_event("http_listener_stopped")
+        service.wait_for_event("shutdown_drain_completed")
         service.wait_for_event("service_stopped")
-        assert_event_absent("".join(service.lines), "http_response_write_failed")
-        assert_event_absent("".join(service.lines), "http_accept_retry_failed")
+        output = "".join(service.lines)
+        assert_shutdown_sequence(output, "shutdown_drain_completed")
+        assert_event_absent(output, "shutdown_drain_timed_out")
+        assert_event_absent(output, "http_response_write_failed")
+        assert_event_absent(output, "http_accept_retry_failed")
     finally:
         if connection is not None:
             connection.close()
+        service.cleanup()
+
+
+def test_partial_request_closes_during_drain(binary):
+    service = ServiceProcess(binary, {"APIGATE_SHUTDOWN_GRACE_MS": "3000"})
+    partial = None
+    query_marker = "drain-query-" + secrets.token_hex(16)
+    authorization_marker = "drain-authorization-" + secrets.token_hex(16)
+    cookie_marker = "drain-cookie-" + secrets.token_hex(16)
+    try:
+        port = int(service.wait_for_event("http_listener_started")["port"])
+        partial = socket.create_connection(("127.0.0.1", port), timeout=3)
+        partial.sendall(
+            (
+                "POST /partial?credential="
+                + query_marker
+                + " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 32\r\n"
+                + "Authorization: Bearer "
+                + authorization_marker
+                + "\r\nCookie: session="
+                + cookie_marker
+                + "\r\n"
+            ).encode("ascii")
+        )
+
+        service.terminate()
+        service.wait_for_event("shutdown_signal_received")
+        service.wait_for_event("shutdown_drain_started")
+        service.wait_for_event("http_listener_stopped")
+        assert_peer_closed(partial, timeout=1)
+
+        assert_new_connection_not_served(port)
+
+        assert service.process.wait(timeout=5) == 0
+        service.finish_log_reader()
+        service.wait_for_event("shutdown_drain_completed")
+        service.wait_for_event("service_stopped")
+        output = "".join(service.lines)
+        assert_shutdown_sequence(output, "shutdown_drain_completed")
+        for event in (
+            "http_request_rejected",
+            "http_upstream_request_failed",
+            "http_response_write_failed",
+            "http_accept_retry_failed",
+        ):
+            assert_event_absent(output, event)
+        assert_sensitive_values_absent(
+            output,
+            {
+                "query": query_marker,
+                "authorization": authorization_marker,
+                "cookie": cookie_marker,
+            },
+        )
+    finally:
+        if partial is not None:
+            partial.close()
         service.cleanup()
 
 
@@ -694,7 +799,9 @@ def test_sensitive_request_data_not_logged(binary):
         connection = None
         service.finish_log_reader()
         service.wait_for_event("shutdown_signal_received")
+        service.wait_for_event("shutdown_drain_started")
         service.wait_for_event("http_listener_stopped")
+        service.wait_for_event("shutdown_drain_completed")
         service.wait_for_event("service_stopped")
 
         complete_output = "".join(service.lines)
@@ -738,6 +845,7 @@ def test_port_conflict_and_config_check(binary):
                 "APIGATE_LISTEN_PORT": str(port),
                 "APIGATE_MAX_CONNECTIONS": "17",
                 "APIGATE_MAX_CONCURRENT_PROXIES": "9",
+                "APIGATE_SHUTDOWN_GRACE_MS": "1234",
             }
         )
 
@@ -782,6 +890,7 @@ def test_port_conflict_and_config_check(binary):
             assert payload["listen_port"] == port
             assert payload["max_connections"] == 17
             assert payload["max_concurrent_proxies"] == 9
+            assert payload["shutdown_grace_ms"] == 1234
             assert payload["proxy_enabled"] is False
             assert "upstream_timeout_ms" not in payload
 
@@ -819,6 +928,7 @@ def main():
     test_service_environment_isolation(binary)
     test_http_and_shutdown(binary)
     test_active_keep_alive_shutdown(binary)
+    test_partial_request_closes_during_drain(binary)
     test_connection_capacity_backpressure(binary)
     test_sensitive_request_data_not_logged(binary)
     test_port_conflict_and_config_check(binary)

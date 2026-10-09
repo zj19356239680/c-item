@@ -52,6 +52,7 @@ void print_help() {
         << "  APIGATE_LISTEN_PORT   TCP port, 0 selects an ephemeral port (default: 8080)\n"
         << "  APIGATE_MAX_CONNECTIONS Active downstream connection limit (default: 256)\n"
         << "  APIGATE_MAX_CONCURRENT_PROXIES Concurrent upstream proxy limit (default: 32)\n"
+        << "  APIGATE_SHUTDOWN_GRACE_MS Drain deadline in milliseconds (default: 5000)\n"
         << "  APIGATE_UPSTREAM_HOST Optional static HTTP upstream host\n"
         << "  APIGATE_UPSTREAM_PORT Optional static HTTP upstream port (1-65535)\n"
         << "  APIGATE_UPSTREAM_TIMEOUT_MS Per-stage timeout in milliseconds (default: 3000)\n";
@@ -96,6 +97,7 @@ int main(int argc, char* argv[]) {
                                   {"listen_port", config.listen_port},
                                   {"max_connections", config.max_connections},
                                   {"max_concurrent_proxies", config.max_concurrent_proxies},
+                                  {"shutdown_grace_ms", config.shutdown_grace_ms},
                                   {"proxy_enabled", config.upstream.has_value()}};
             if (config.upstream) {
                 fields["upstream_timeout_ms"] = config.upstream->timeout_ms;

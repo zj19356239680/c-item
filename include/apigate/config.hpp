@@ -32,6 +32,7 @@ struct AppConfig {
     std::uint16_t listen_port{8080};
     std::uint16_t max_connections{256};
     std::uint16_t max_concurrent_proxies{32};
+    std::uint32_t shutdown_grace_ms{5000};
     std::optional<UpstreamConfig> upstream;
 };
 

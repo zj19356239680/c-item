@@ -31,6 +31,55 @@ enum class AcceptCapacityAction : std::uint8_t {
     resume_and_start,
 };
 
+enum class ServerDrainPhase : std::uint8_t {
+    running,
+    draining,
+    force_stopping,
+    completed,
+};
+
+enum class DrainStartResult : std::uint8_t {
+    unchanged,
+    started,
+    completed,
+};
+
+enum class DrainTimerDisposition : std::uint8_t {
+    ignored,
+    timed_out,
+    fatal,
+};
+
+enum class SessionPhase : std::uint8_t {
+    reading,
+    proxying,
+    writing,
+    finished,
+};
+
+enum class SessionDrainDisposition : std::uint8_t {
+    close_immediately,
+    wait_for_current,
+    ignored,
+};
+
+class DrainState {
+   public:
+    void session_started() noexcept;
+    [[nodiscard]] bool session_finished() noexcept;
+    [[nodiscard]] DrainStartResult begin_drain() noexcept;
+    [[nodiscard]] DrainStartResult begin_force_stop() noexcept;
+
+    [[nodiscard]] ServerDrainPhase phase() const noexcept;
+    [[nodiscard]] std::size_t active_sessions() const noexcept;
+
+   private:
+    [[nodiscard]] DrainStartResult transition_to(ServerDrainPhase phase) noexcept;
+
+    ServerDrainPhase phase_{ServerDrainPhase::running};
+    std::size_t active_sessions_{0};
+};
+
 class AcceptCapacityState {
    public:
     explicit AcceptCapacityState(std::size_t max_connections) noexcept;
@@ -133,6 +182,9 @@ void run_accept_retry_failure_actions(RuntimeFailureState& state, ReportAction&&
     const boost::system::error_code& error, bool stopping) noexcept;
 [[nodiscard]] AcceptRetryDisposition classify_accept_retry_completion(
     const boost::system::error_code& error, bool stopping) noexcept;
+[[nodiscard]] DrainTimerDisposition classify_drain_timer_completion(
+    const boost::system::error_code& error, ServerDrainPhase phase) noexcept;
+[[nodiscard]] SessionDrainDisposition classify_session_drain(SessionPhase phase) noexcept;
 
 }  // namespace apigate::detail
 

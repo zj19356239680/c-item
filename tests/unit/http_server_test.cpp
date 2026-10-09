@@ -23,12 +23,20 @@ using apigate::detail::AcceptCapacityAction;
 using apigate::detail::AcceptCapacityState;
 using apigate::detail::AcceptRetryDisposition;
 using apigate::detail::classify_accept_retry_completion;
+using apigate::detail::classify_drain_timer_completion;
 using apigate::detail::classify_http_write_result;
+using apigate::detail::classify_session_drain;
+using apigate::detail::DrainStartResult;
+using apigate::detail::DrainState;
+using apigate::detail::DrainTimerDisposition;
 using apigate::detail::HttpWriteDisposition;
 using apigate::detail::ProxyAdmissionState;
 using apigate::detail::ProxyPermit;
 using apigate::detail::run_accept_retry_failure_actions;
 using apigate::detail::RuntimeFailureState;
+using apigate::detail::ServerDrainPhase;
+using apigate::detail::SessionDrainDisposition;
+using apigate::detail::SessionPhase;
 
 TEST(HttpWriteDispositionTest, ClassifiesSuccessfulCompletion) {
     EXPECT_EQ(classify_http_write_result({}, false), HttpWriteDisposition::success);
@@ -91,6 +99,72 @@ TEST(AcceptRetryDispositionTest, TreatsUnexpectedCancellationAsFatal) {
 
     EXPECT_EQ(classify_accept_retry_completion(operation_aborted, false),
               AcceptRetryDisposition::fatal);
+}
+
+TEST(DrainStateTest, CompletesImmediatelyWithoutSessionsAndIgnoresRepeatedStart) {
+    DrainState state;
+
+    EXPECT_EQ(state.begin_drain(), DrainStartResult::completed);
+    EXPECT_EQ(state.phase(), ServerDrainPhase::completed);
+    EXPECT_EQ(state.active_sessions(), 0U);
+    EXPECT_EQ(state.begin_drain(), DrainStartResult::unchanged);
+    EXPECT_EQ(state.begin_force_stop(), DrainStartResult::unchanged);
+}
+
+TEST(DrainStateTest, WaitsForEverySessionAndCompletesOnlyOnce) {
+    DrainState state;
+    state.session_started();
+    state.session_started();
+
+    EXPECT_EQ(state.begin_drain(), DrainStartResult::started);
+    EXPECT_EQ(state.phase(), ServerDrainPhase::draining);
+    EXPECT_FALSE(state.session_finished());
+    EXPECT_EQ(state.active_sessions(), 1U);
+    EXPECT_TRUE(state.session_finished());
+    EXPECT_EQ(state.phase(), ServerDrainPhase::completed);
+    EXPECT_FALSE(state.session_finished());
+    EXPECT_EQ(state.active_sessions(), 0U);
+}
+
+TEST(DrainStateTest, FatalOrDeadlineCanForceAStartedDrain) {
+    DrainState deadline_state;
+    deadline_state.session_started();
+    ASSERT_EQ(deadline_state.begin_drain(), DrainStartResult::started);
+    EXPECT_EQ(deadline_state.begin_force_stop(), DrainStartResult::started);
+    EXPECT_EQ(deadline_state.phase(), ServerDrainPhase::force_stopping);
+    EXPECT_TRUE(deadline_state.session_finished());
+    EXPECT_EQ(deadline_state.phase(), ServerDrainPhase::completed);
+
+    DrainState fatal_state;
+    fatal_state.session_started();
+    EXPECT_EQ(fatal_state.begin_force_stop(), DrainStartResult::started);
+    EXPECT_EQ(fatal_state.phase(), ServerDrainPhase::force_stopping);
+}
+
+TEST(DrainTimerDispositionTest, DistinguishesTimeoutCancellationAndFatalErrors) {
+    const boost::system::error_code operation_aborted = asio::error::operation_aborted;
+    const boost::system::error_code timer_error = asio::error::network_down;
+
+    EXPECT_EQ(classify_drain_timer_completion({}, ServerDrainPhase::draining),
+              DrainTimerDisposition::timed_out);
+    EXPECT_EQ(classify_drain_timer_completion(operation_aborted, ServerDrainPhase::completed),
+              DrainTimerDisposition::ignored);
+    EXPECT_EQ(classify_drain_timer_completion(timer_error, ServerDrainPhase::force_stopping),
+              DrainTimerDisposition::ignored);
+    EXPECT_EQ(classify_drain_timer_completion(operation_aborted, ServerDrainPhase::draining),
+              DrainTimerDisposition::fatal);
+    EXPECT_EQ(classify_drain_timer_completion(timer_error, ServerDrainPhase::draining),
+              DrainTimerDisposition::fatal);
+}
+
+TEST(SessionDrainDispositionTest, ClosesReadsAndWaitsForDispatchedWork) {
+    EXPECT_EQ(classify_session_drain(SessionPhase::reading),
+              SessionDrainDisposition::close_immediately);
+    EXPECT_EQ(classify_session_drain(SessionPhase::proxying),
+              SessionDrainDisposition::wait_for_current);
+    EXPECT_EQ(classify_session_drain(SessionPhase::writing),
+              SessionDrainDisposition::wait_for_current);
+    EXPECT_EQ(classify_session_drain(SessionPhase::finished), SessionDrainDisposition::ignored);
 }
 
 TEST(AcceptCapacityStateTest, PausesAndResumesWithoutDuplicateAccepts) {
@@ -202,9 +276,19 @@ TEST(HttpServerTest, RejectsEmptyRuntimeFailureCallback) {
     const apigate::AppConfig config;
     apigate::StructuredLogger logger{config};
 
-    EXPECT_THROW(
-        static_cast<void>(apigate::HttpServer{io_context, config, logger, std::function<void()>{}}),
-        std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(apigate::HttpServer{io_context, config, logger,
+                                                       std::function<void()>{}, []() noexcept {}}),
+                 std::invalid_argument);
+}
+
+TEST(HttpServerTest, RejectsEmptyDrainCompletionCallback) {
+    boost::asio::io_context io_context;
+    const apigate::AppConfig config;
+    apigate::StructuredLogger logger{config};
+
+    EXPECT_THROW(static_cast<void>(apigate::HttpServer{io_context, config, logger, []() noexcept {},
+                                                       std::function<void()>{}}),
+                 std::invalid_argument);
 }
 
 TEST(AcceptRetryFailureActionsTest, RunsReportStopAndNotificationOnce) {

@@ -45,8 +45,9 @@ curl -fsS http://127.0.0.1:8080/readyz
 {"service":"api-gate","status":"ready"}
 ```
 
-在运行服务的终端按 `Ctrl+C` 停止。`/readyz` 当前只表示进程正在响应请求，
-**不检查上游服务或其他依赖**。
+在运行服务的终端按 `Ctrl+C` 会启动有截止时间的优雅排空。`/readyz` 在正常运行时
+表示进程正在响应请求，**不检查上游服务或其他依赖**；排空开始后监听器立即关闭，
+新的探针通常得到连接失败，而不是固定的 HTTP 503。
 
 ## 当前 HTTP 行为
 
@@ -93,6 +94,13 @@ DELETE、OPTIONS、CONNECT 及其他方法返回 405。上游解析、连接、�
 backlog 中的连接返回 HTTP 503，也不修改系统 backlog。两项限制约束对象数量，不是
 精确内存字节预算；默认值只是当前 MVP 的保守边界，不是生产容量或性能保证。
 
+收到 `SIGTERM` 或 `SIGINT` 后，服务立即停止 accept，并关闭空闲 keep-alive、部分请求
+及其他尚未分派的连接。已经分派的本地响应或上游代理交换可以在
+`APIGATE_SHUTDOWN_GRACE_MS` 期限内完成，响应写完后连接关闭且不再读取下一请求；期限
+到达后剩余操作会被取消。正常完成及受控超时都返回 0，非预期运行时故障仍返回非零。
+当前没有预排空 HTTP API 或独立管理端口，也不支持用第二个信号立即强退。外部进程
+管理器的强制终止期限必须大于应用排空期限，并为取消回调和进程清理保留余量。
+
 ## 构建、测试与运行
 
 在仓库根目录执行：
@@ -132,6 +140,7 @@ bash scripts/run.sh --version
 | `APIGATE_LISTEN_PORT` | `8080` | 0–65535；0 由内核分配临时端口 |
 | `APIGATE_MAX_CONNECTIONS` | `256` | 1–65535；活动下游连接数上限 |
 | `APIGATE_MAX_CONCURRENT_PROXIES` | `32` | 1–65535；并发上游代理交换数上限 |
+| `APIGATE_SHUTDOWN_GRACE_MS` | `5000` | 1–60000；信号排空期限，单位毫秒 |
 | `APIGATE_UPSTREAM_HOST` | 未设置 | 纯 DNS 主机名、IPv4 或 IPv6 字面地址；必须与端口同时设置 |
 | `APIGATE_UPSTREAM_PORT` | 未设置 | 1–65535；必须与主机同时设置 |
 | `APIGATE_UPSTREAM_TIMEOUT_MS` | `3000`（代理启用时） | 1–60000；仅可与完整上游配置一起使用 |
@@ -152,10 +161,10 @@ bash scripts/run.sh
 
 三项上游变量均未设置时代理关闭，原有未知 GET 的 404 及其他方法的 405 行为保持不变。两项容量配置
 始终校验；代理关闭时代理并发上限不被使用。配置检查结果会报告两个数值上限、
-`proxy_enabled` 和启用时的 `upstream_timeout_ms`，不会输出上游主机名。
+`shutdown_grace_ms`、`proxy_enabled` 和启用时的 `upstream_timeout_ms`，不会输出上游主机名。
 
 当前没有全局字节预算、每客户端/IP 限制或请求速率限制；也不支持其他代理方法、
-流式上传、连接池、多上游、上游 TLS、HTTP/2、WebSocket 或优雅排空。实际可承载数量
+流式上传、连接池、多上游、上游 TLS、HTTP/2、WebSocket 或预排空管理阶段。实际可承载数量
 仍受文件描述符、内存、CPU、请求/响应缓冲和操作系统 backlog 等因素约束。现有测试
 覆盖不构成生产容量或协议兼容性承诺。
 

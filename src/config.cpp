@@ -16,7 +16,7 @@ namespace {
 
 constexpr std::size_t max_label_length = 64;
 constexpr std::size_t max_hostname_length = 253;
-constexpr std::uint32_t max_upstream_timeout_ms = 60000;
+constexpr std::uint32_t max_timeout_ms = 60000;
 
 [[nodiscard]] std::optional<std::string> read_environment(const char* name) {
     // Configuration is loaded once, before any worker threads can mutate the environment.
@@ -104,12 +104,13 @@ void validate_label(std::string_view value, const char* variable_name) {
     return static_cast<std::uint16_t>(limit);
 }
 
-[[nodiscard]] std::uint32_t parse_upstream_timeout(std::string_view value) {
+[[nodiscard]] std::uint32_t parse_bounded_milliseconds(std::string_view value,
+                                                       const char* variable_name) {
     std::uint32_t timeout = 0;
     const auto result = std::from_chars(value.data(), value.data() + value.size(), timeout);
     if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || timeout == 0 ||
-        timeout > max_upstream_timeout_ms) {
-        throw ConfigError("APIGATE_UPSTREAM_TIMEOUT_MS must be an integer from 1 to 60000");
+        timeout > max_timeout_ms) {
+        throw ConfigError(std::string{variable_name} + " must be an integer from 1 to 60000");
     }
     return timeout;
 }
@@ -184,6 +185,9 @@ AppConfig load_config_from_environment() {
         config.max_concurrent_proxies =
             parse_capacity_limit(*value, "APIGATE_MAX_CONCURRENT_PROXIES");
     }
+    if (const auto value = read_environment("APIGATE_SHUTDOWN_GRACE_MS")) {
+        config.shutdown_grace_ms = parse_bounded_milliseconds(*value, "APIGATE_SHUTDOWN_GRACE_MS");
+    }
 
     const auto upstream_host = read_environment("APIGATE_UPSTREAM_HOST");
     const auto upstream_port = read_environment("APIGATE_UPSTREAM_PORT");
@@ -198,7 +202,8 @@ AppConfig load_config_from_environment() {
         UpstreamConfig upstream{parse_upstream_host(*upstream_host),
                                 parse_upstream_port(*upstream_port), 3000};
         if (upstream_timeout) {
-            upstream.timeout_ms = parse_upstream_timeout(*upstream_timeout);
+            upstream.timeout_ms =
+                parse_bounded_milliseconds(*upstream_timeout, "APIGATE_UPSTREAM_TIMEOUT_MS");
         }
         config.upstream = std::move(upstream);
     }
