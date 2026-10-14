@@ -14,6 +14,7 @@
 #include "apigate/config.hpp"
 #include "apigate/http_server.hpp"
 #include "apigate/logging.hpp"
+#include "http_server_internal.hpp"
 
 namespace apigate {
 namespace {
@@ -45,10 +46,9 @@ class Application::Impl {
             return EXIT_FAILURE;
         }
 
-        signals_.async_wait(
-            [this](const boost::system::error_code& error, int signal_number) noexcept {
-                on_signal(error, signal_number);
-            });
+        if (!arm_signal_wait()) {
+            return exit_code_;
+        }
 
         safe_info("service_started", [this] {
             return nlohmann::json{{"listen_address", config_.listen_address},
@@ -63,30 +63,70 @@ class Application::Impl {
     }
 
    private:
-    void on_signal(const boost::system::error_code& error, int signal_number) noexcept {
-        if (error) {
-            if (error != boost::asio::error::operation_aborted) {
-                safe_critical("signal_wait_failed", error.value());
-                exit_code_ = EXIT_FAILURE;
-                server_.stop();
-                io_context_.stop();
-            }
-            return;
+    [[nodiscard]] bool arm_signal_wait() noexcept {
+        try {
+            signals_.async_wait(
+                [this](const boost::system::error_code& error, int signal_number) noexcept {
+                    on_signal(error, signal_number);
+                });
+            return true;
+        } catch (const boost::system::system_error& error) {
+            fail_signal_wait(error.code().value());
+        } catch (...) {
+            fail_signal_wait(0);
         }
+        return false;
+    }
 
-        safe_info("shutdown_signal_received",
-                  [signal_number] { return nlohmann::json{{"signal", signal_number}}; });
-        server_.begin_drain();
+    void on_signal(const boost::system::error_code& error, int signal_number) noexcept {
+        switch (shutdown_signal_state_.on_wait_completion(error)) {
+            case detail::ShutdownSignalDisposition::begin_drain:
+                // Re-arm before doing any other work so a second signal can be queued
+                // throughout logging and drain startup.
+                if (!arm_signal_wait()) {
+                    return;
+                }
+                safe_info("shutdown_signal_received",
+                          [signal_number] { return nlohmann::json{{"signal", signal_number}}; });
+                server_.begin_drain();
+                return;
+            case detail::ShutdownSignalDisposition::force_stop:
+                server_.force_stop_drain(signal_number);
+                return;
+            case detail::ShutdownSignalDisposition::ignored:
+                return;
+            case detail::ShutdownSignalDisposition::fatal:
+                fail_signal_wait(error.value());
+                return;
+        }
+    }
+
+    void fail_signal_wait(int error_code) noexcept {
+        shutdown_signal_state_.mark_completed();
+        safe_critical("signal_wait_failed", error_code);
+        exit_code_ = EXIT_FAILURE;
+        server_.stop();
+        io_context_.stop();
     }
 
     void on_runtime_failure() noexcept {
+        shutdown_signal_state_.mark_completed();
         exit_code_ = EXIT_FAILURE;
         io_context_.stop();
     }
 
     void on_drain_complete() noexcept {
+        shutdown_signal_state_.mark_completed();
+        try {
+            signals_.cancel();
+        } catch (const boost::system::system_error& error) {
+            fail_signal_wait(error.code().value());
+        } catch (...) {
+            fail_signal_wait(0);
+        }
         // HttpServer has released its final asynchronous work. The single io_context
-        // now exits naturally once cancellation completions have been dispatched.
+        // exits naturally after the cancelled signal wait and other cancellation
+        // completions have been dispatched.
     }
 
     template <typename FieldsFactory>
@@ -111,6 +151,7 @@ class Application::Impl {
     boost::asio::io_context io_context_;
     boost::asio::signal_set signals_;
     HttpServer server_;
+    detail::ShutdownSignalState shutdown_signal_state_;
     int exit_code_{EXIT_SUCCESS};
 };
 

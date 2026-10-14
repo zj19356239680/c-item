@@ -25,6 +25,7 @@ class HttpServer {
 
     void start();
     void begin_drain() noexcept;
+    void force_stop_drain(int signal_number) noexcept;
     void stop() noexcept;
     [[nodiscard]] std::uint16_t bound_port() const noexcept;
 

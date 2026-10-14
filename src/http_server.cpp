@@ -723,6 +723,31 @@ class HttpServer::Impl {
         }
     }
 
+    void force_stop_drain(int signal_number) noexcept {
+        if (drain_state_.phase() != detail::ServerDrainPhase::draining) {
+            return;
+        }
+        const auto active_sessions = drain_state_.active_sessions();
+        const auto result = drain_state_.begin_force_stop();
+        if (result == detail::DrainStartResult::unchanged) {
+            return;
+        }
+        drain_forced_ = true;
+        safe_info(
+            "shutdown_force_requested",
+            [signal_number, active_sessions] {
+                return nlohmann::json{{"signal", signal_number},
+                                      {"active_sessions", active_sessions}};
+            },
+            "shutdown_force_log_failed");
+        stop_accepting();
+        cancel_drain_timer();
+        stop_all_sessions();
+        if (result == detail::DrainStartResult::completed) {
+            finish_drain();
+        }
+    }
+
     void stop() noexcept {
         drain_completion_enabled_ = false;
         const auto result = drain_state_.begin_force_stop();
@@ -943,7 +968,7 @@ class HttpServer::Impl {
         if (result == detail::DrainStartResult::unchanged) {
             return;
         }
-        drain_timed_out_ = true;
+        drain_forced_ = true;
         safe_info(
             "shutdown_drain_timed_out",
             [forced_sessions] { return nlohmann::json{{"forced_sessions", forced_sessions}}; },
@@ -969,7 +994,7 @@ class HttpServer::Impl {
         }
         drain_callback_claimed_ = true;
         cancel_drain_timer();
-        if (!drain_timed_out_) {
+        if (!drain_forced_) {
             safe_info(
                 "shutdown_drain_completed", [] { return nlohmann::json{{"active_sessions", 0}}; },
                 "shutdown_drain_complete_log_failed");
@@ -1036,7 +1061,7 @@ class HttpServer::Impl {
     bool listener_stop_logged_{false};
     bool drain_completion_enabled_{false};
     bool drain_callback_claimed_{false};
-    bool drain_timed_out_{false};
+    bool drain_forced_{false};
 };
 
 HttpServer::HttpServer(asio::io_context& io_context, const AppConfig& config,
@@ -1050,6 +1075,10 @@ HttpServer::~HttpServer() = default;
 void HttpServer::start() { impl_->start(); }
 
 void HttpServer::begin_drain() noexcept { impl_->begin_drain(); }
+
+void HttpServer::force_stop_drain(int signal_number) noexcept {
+    impl_->force_stop_drain(signal_number);
+}
 
 void HttpServer::stop() noexcept { impl_->stop(); }
 

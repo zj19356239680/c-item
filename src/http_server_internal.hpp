@@ -1,6 +1,7 @@
 #ifndef APIGATE_HTTP_SERVER_INTERNAL_HPP_
 #define APIGATE_HTTP_SERVER_INTERNAL_HPP_
 
+#include <boost/asio/error.hpp>
 #include <boost/system/error_code.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -61,6 +62,42 @@ enum class SessionDrainDisposition : std::uint8_t {
     close_immediately,
     wait_for_current,
     ignored,
+};
+
+enum class ShutdownSignalDisposition : std::uint8_t {
+    begin_drain,
+    force_stop,
+    ignored,
+    fatal,
+};
+
+class ShutdownSignalState {
+   public:
+    [[nodiscard]] ShutdownSignalDisposition on_wait_completion(
+        const boost::system::error_code& error) noexcept {
+        if (error) {
+            if (completed_ && error == boost::asio::error::operation_aborted) {
+                return ShutdownSignalDisposition::ignored;
+            }
+            return ShutdownSignalDisposition::fatal;
+        }
+        if (completed_ || force_requested_) {
+            return ShutdownSignalDisposition::ignored;
+        }
+        if (!draining_) {
+            draining_ = true;
+            return ShutdownSignalDisposition::begin_drain;
+        }
+        force_requested_ = true;
+        return ShutdownSignalDisposition::force_stop;
+    }
+
+    void mark_completed() noexcept { completed_ = true; }
+
+   private:
+    bool draining_{false};
+    bool force_requested_{false};
+    bool completed_{false};
 };
 
 class DrainState {

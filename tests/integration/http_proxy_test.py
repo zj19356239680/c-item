@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 from http_server_test import (
     ServiceProcess,
@@ -802,6 +803,7 @@ def test_shutdown_drains_active_proxy(binary):
             output = "".join(service.lines)
             records = assert_shutdown_sequence(output, "shutdown_drain_completed")
             assert_event_absent(output, "shutdown_drain_timed_out")
+            assert_event_absent(output, "shutdown_force_requested")
             assert_event_absent(output, "http_upstream_request_failed")
             assert_event_absent(output, "http_response_write_failed")
             assert_event_absent(output, "http_accept_retry_failed")
@@ -872,6 +874,7 @@ def test_shutdown_deadline_forces_active_proxy(binary):
         output = "".join(service.lines)
         records = assert_shutdown_sequence(output, "shutdown_drain_timed_out")
         assert_event_absent(output, "shutdown_drain_completed")
+        assert_event_absent(output, "shutdown_force_requested")
         assert_event_absent(output, "http_upstream_request_failed")
         assert_event_absent(output, "http_response_write_failed")
         assert_event_absent(output, "http_accept_retry_failed")
@@ -892,6 +895,113 @@ def test_shutdown_deadline_forces_active_proxy(binary):
         upstream.state.release_block.set()
         service.cleanup()
         upstream.close()
+
+
+def test_second_signal_forces_active_proxy(binary):
+    for first_signal, second_signal in (
+        (signal.SIGTERM, signal.SIGTERM),
+        (signal.SIGTERM, signal.SIGINT),
+    ):
+        upstream = ControlledUpstream()
+        upstream.start()
+        environment = proxy_environment(upstream.port, "15000", max_proxies=1)
+        environment["APIGATE_SHUTDOWN_GRACE_MS"] = "10000"
+        service = ServiceProcess(binary, environment)
+        client_done = queue.Queue()
+        query_marker = "force-query-" + secrets.token_hex(16)
+        authorization_marker = "force-authorization-" + secrets.token_hex(16)
+        cookie_marker = "force-cookie-" + secrets.token_hex(16)
+        body_marker = "force-body-" + secrets.token_hex(16)
+        client = None
+        try:
+            port = int(service.wait_for_event("http_listener_started")["port"])
+
+            def request_blocked():
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+                        request_body = ("payload=" + body_marker).encode("ascii")
+                        client.sendall(
+                            (
+                                "PATCH /blocked?credential="
+                                + query_marker
+                                + " HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer "
+                                + authorization_marker
+                                + "\r\nCookie: session="
+                                + cookie_marker
+                                + "\r\nContent-Type: application/octet-stream\r\n"
+                                + f"Content-Length: {len(request_body)}\r\n"
+                                + "Connection: keep-alive\r\n\r\n"
+                            ).encode("ascii")
+                            + request_body
+                        )
+                        response = http.client.HTTPResponse(client)
+                        response.begin()
+                        response.read()
+                        client_done.put("response")
+                except (ConnectionError, http.client.HTTPException, socket.timeout):
+                    client_done.put("closed")
+
+            client = threading.Thread(target=request_blocked)
+            client.start()
+            assert upstream.state.block_started.wait(timeout=3)
+            service.process.send_signal(first_signal)
+            service.wait_for_event("shutdown_signal_received")
+            started = service.wait_for_event("shutdown_drain_started")
+            assert started["active_sessions"] == 1
+            assert started["grace_ms"] == 10000
+            service.wait_for_event("http_listener_stopped")
+
+            force_started_at = time.monotonic()
+            service.process.send_signal(second_signal)
+            forced = service.wait_for_event("shutdown_force_requested")
+            assert forced["signal"] == second_signal
+            assert forced["active_sessions"] == 1
+            assert service.process.wait(timeout=5) == 0
+            assert time.monotonic() - force_started_at < 5
+            client.join(timeout=3)
+            assert not client.is_alive(), "forced proxy client did not finish"
+            assert client_done.get(timeout=1) == "closed"
+            service.finish_log_reader()
+            service.wait_for_event("service_stopped")
+
+            output = "".join(service.lines)
+            records = assert_shutdown_sequence(output, "shutdown_force_requested")
+            assert_event_absent(output, "shutdown_drain_completed")
+            assert_event_absent(output, "shutdown_drain_timed_out")
+            assert_event_absent(output, "http_upstream_request_failed")
+            assert_event_absent(output, "http_response_write_failed")
+            assert_event_absent(output, "http_accept_retry_failed")
+            force_events = [
+                record
+                for record in records
+                if record["payload"].get("event") == "shutdown_force_requested"
+            ]
+            assert len(force_events) == 1
+            stopped = [
+                record
+                for record in records
+                if record["payload"].get("event") == "service_stopped"
+            ]
+            assert len(stopped) == 1
+            assert stopped[0]["payload"]["exit_code"] == 0
+            assert_sensitive_values_absent(
+                output,
+                {
+                    "query": query_marker,
+                    "authorization": authorization_marker,
+                    "cookie": cookie_marker,
+                    "body": body_marker,
+                },
+            )
+        finally:
+            upstream.state.release_block.set()
+            service.cleanup()
+            upstream.close()
+            if client is not None:
+                client.join(timeout=5)
+                assert not client.is_alive(), (
+                    "forced proxy client did not finish during cleanup"
+                )
 
 
 def test_config_check_hides_upstream_host(binary):
@@ -932,6 +1042,7 @@ def main():
     test_proxy_capacity_rejects_without_visiting_upstream(binary)
     test_shutdown_drains_active_proxy(binary)
     test_shutdown_deadline_forces_active_proxy(binary)
+    test_second_signal_forces_active_proxy(binary)
 
 
 if __name__ == "__main__":

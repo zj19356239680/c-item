@@ -57,6 +57,10 @@ if grep -q '"event":"shutdown_drain_timed_out"' "${log_file}"; then
     echo "shutdown without sessions unexpectedly reached the drain deadline" >&2
     exit 1
 fi
+if grep -q '"event":"shutdown_force_requested"' "${log_file}"; then
+    echo "single-signal shutdown unexpectedly requested a forced stop" >&2
+    exit 1
+fi
 if grep -q '"event":"http_accept_retry_failed"' "${log_file}"; then
     echo "normal shutdown unexpectedly reported an accept retry failure" >&2
     exit 1

@@ -37,6 +37,8 @@ using apigate::detail::RuntimeFailureState;
 using apigate::detail::ServerDrainPhase;
 using apigate::detail::SessionDrainDisposition;
 using apigate::detail::SessionPhase;
+using apigate::detail::ShutdownSignalDisposition;
+using apigate::detail::ShutdownSignalState;
 
 TEST(HttpWriteDispositionTest, ClassifiesSuccessfulCompletion) {
     EXPECT_EQ(classify_http_write_result({}, false), HttpWriteDisposition::success);
@@ -141,6 +143,51 @@ TEST(DrainStateTest, FatalOrDeadlineCanForceAStartedDrain) {
     EXPECT_EQ(fatal_state.phase(), ServerDrainPhase::force_stopping);
 }
 
+TEST(DrainStateTest, ForceStopAndLastSessionCompletionHaveOneWinner) {
+    DrainState completion_wins;
+    completion_wins.session_started();
+    ASSERT_EQ(completion_wins.begin_drain(), DrainStartResult::started);
+    EXPECT_TRUE(completion_wins.session_finished());
+    EXPECT_EQ(completion_wins.begin_force_stop(), DrainStartResult::unchanged);
+    EXPECT_FALSE(completion_wins.session_finished());
+
+    DrainState force_wins;
+    force_wins.session_started();
+    ASSERT_EQ(force_wins.begin_drain(), DrainStartResult::started);
+    EXPECT_EQ(force_wins.begin_force_stop(), DrainStartResult::started);
+    EXPECT_EQ(force_wins.begin_force_stop(), DrainStartResult::unchanged);
+    EXPECT_TRUE(force_wins.session_finished());
+    EXPECT_FALSE(force_wins.session_finished());
+    EXPECT_EQ(force_wins.active_sessions(), 0U);
+}
+
+TEST(ShutdownSignalStateTest, FirstSignalDrainsSecondForcesAndLaterSignalsAreIgnored) {
+    ShutdownSignalState state;
+
+    EXPECT_EQ(state.on_wait_completion({}), ShutdownSignalDisposition::begin_drain);
+    EXPECT_EQ(state.on_wait_completion({}), ShutdownSignalDisposition::force_stop);
+    EXPECT_EQ(state.on_wait_completion({}), ShutdownSignalDisposition::ignored);
+}
+
+TEST(ShutdownSignalStateTest, ExpectedCancellationIsIgnoredOnlyAfterCompletion) {
+    const boost::system::error_code operation_aborted = asio::error::operation_aborted;
+    ShutdownSignalState active;
+    ShutdownSignalState completed;
+    completed.mark_completed();
+
+    EXPECT_EQ(active.on_wait_completion(operation_aborted), ShutdownSignalDisposition::fatal);
+    EXPECT_EQ(completed.on_wait_completion(operation_aborted), ShutdownSignalDisposition::ignored);
+    EXPECT_EQ(completed.on_wait_completion({}), ShutdownSignalDisposition::ignored);
+}
+
+TEST(ShutdownSignalStateTest, UnexpectedWaitErrorsRemainFatalAfterCompletion) {
+    const boost::system::error_code wait_error = asio::error::network_down;
+    ShutdownSignalState state;
+    state.mark_completed();
+
+    EXPECT_EQ(state.on_wait_completion(wait_error), ShutdownSignalDisposition::fatal);
+}
+
 TEST(DrainTimerDispositionTest, DistinguishesTimeoutCancellationAndFatalErrors) {
     const boost::system::error_code operation_aborted = asio::error::operation_aborted;
     const boost::system::error_code timer_error = asio::error::network_down;
@@ -150,6 +197,8 @@ TEST(DrainTimerDispositionTest, DistinguishesTimeoutCancellationAndFatalErrors) 
     EXPECT_EQ(classify_drain_timer_completion(operation_aborted, ServerDrainPhase::completed),
               DrainTimerDisposition::ignored);
     EXPECT_EQ(classify_drain_timer_completion(timer_error, ServerDrainPhase::force_stopping),
+              DrainTimerDisposition::ignored);
+    EXPECT_EQ(classify_drain_timer_completion(operation_aborted, ServerDrainPhase::force_stopping),
               DrainTimerDisposition::ignored);
     EXPECT_EQ(classify_drain_timer_completion(operation_aborted, ServerDrainPhase::draining),
               DrainTimerDisposition::fatal);
