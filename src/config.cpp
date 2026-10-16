@@ -17,6 +17,7 @@ namespace {
 constexpr std::size_t max_label_length = 64;
 constexpr std::size_t max_hostname_length = 253;
 constexpr std::uint32_t max_timeout_ms = 60000;
+constexpr std::uint64_t max_in_flight_bytes_limit = 1073741824;
 
 [[nodiscard]] std::optional<std::string> read_environment(const char* name) {
     // Configuration is loaded once, before any worker threads can mutate the environment.
@@ -115,6 +116,16 @@ void validate_label(std::string_view value, const char* variable_name) {
     return timeout;
 }
 
+[[nodiscard]] std::uint64_t parse_max_in_flight_bytes(std::string_view value) {
+    std::uint64_t bytes = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), bytes);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || bytes == 0 ||
+        bytes > max_in_flight_bytes_limit) {
+        throw ConfigError("APIGATE_MAX_IN_FLIGHT_BYTES must be an integer from 1 to 1073741824");
+    }
+    return bytes;
+}
+
 void validate_dns_hostname(std::string_view value) {
     if (value.size() > max_hostname_length || value.front() == '.' || value.back() == '.') {
         throw ConfigError("APIGATE_UPSTREAM_HOST must be a valid hostname or IP address");
@@ -184,6 +195,9 @@ AppConfig load_config_from_environment() {
     if (const auto value = read_environment("APIGATE_MAX_CONCURRENT_PROXIES")) {
         config.max_concurrent_proxies =
             parse_capacity_limit(*value, "APIGATE_MAX_CONCURRENT_PROXIES");
+    }
+    if (const auto value = read_environment("APIGATE_MAX_IN_FLIGHT_BYTES")) {
+        config.max_in_flight_bytes = parse_max_in_flight_bytes(*value);
     }
     if (const auto value = read_environment("APIGATE_SHUTDOWN_GRACE_MS")) {
         config.shutdown_grace_ms = parse_bounded_milliseconds(*value, "APIGATE_SHUTDOWN_GRACE_MS");

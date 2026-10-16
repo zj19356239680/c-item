@@ -15,6 +15,7 @@
 
 #include "apigate/config.hpp"
 #include "apigate/http_handler.hpp"
+#include "buffer_budget.hpp"
 
 namespace apigate {
 
@@ -38,6 +39,8 @@ struct ProxyFailure {
 struct ProxyResult {
     HttpResponse response;
     std::optional<ProxyFailure> failure;
+    std::optional<std::uint64_t> buffer_budget_rejected_bytes;
+    detail::BufferBudgetPermit body_permit;
 };
 
 namespace detail {
@@ -86,7 +89,7 @@ void run_proxy_completion_action(ProxyCompletionState& state, CompletionAction&&
 [[nodiscard]] HttpRequest make_upstream_request(const UpstreamConfig& config,
                                                 const HttpRequest& request);
 [[nodiscard]] HttpResponse make_downstream_response(const HttpRequest& request,
-                                                    const HttpResponse& upstream_response);
+                                                    HttpResponse upstream_response);
 
 }  // namespace detail
 
@@ -96,8 +99,10 @@ class HttpProxyExchange : public std::enable_shared_from_this<HttpProxyExchange>
     using AbortCallback = std::function<void()>;
 
     HttpProxyExchange(const boost::asio::any_io_executor& executor, const UpstreamConfig& config,
-                      const HttpRequest& request, CompletionCallback on_complete,
-                      AbortCallback on_abort);
+                      const HttpRequest& request,
+                      std::shared_ptr<detail::BufferBudgetState> buffer_budget,
+                      std::shared_ptr<detail::BufferBudgetPermit> request_body_permit,
+                      CompletionCallback on_complete, AbortCallback on_abort);
     ~HttpProxyExchange();
 
     HttpProxyExchange(const HttpProxyExchange&) = delete;

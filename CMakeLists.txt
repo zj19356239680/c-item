@@ -44,6 +44,7 @@ endfunction()
 
 add_library(apigate_core
     src/application.cpp
+    src/buffer_budget.cpp
     src/config.cpp
     src/http_handler.cpp
     src/http_proxy.cpp
@@ -68,6 +69,7 @@ install(TARGETS api-gate RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(BUILD_TESTING)
     find_package(GTest CONFIG REQUIRED)
     add_executable(apigate_unit_tests
+        tests/unit/buffer_budget_test.cpp
         tests/unit/config_test.cpp
         tests/unit/http_handler_test.cpp
         tests/unit/http_proxy_test.cpp

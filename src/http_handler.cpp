@@ -125,6 +125,12 @@ HttpResponse make_gateway_error_response(const HttpRequest& request, GatewayFail
             {{"error",
               {{"code", "gateway_overloaded"}, {"message", "proxy capacity is exhausted"}}}});
     }
+    if (failure == GatewayFailure::buffer_capacity_exhausted) {
+        return make_json_response(
+            request, http::status::service_unavailable,
+            {{"error",
+              {{"code", "gateway_overloaded"}, {"message", "buffer capacity is exhausted"}}}});
+    }
     return make_json_response(
         request, http::status::bad_gateway,
         {{"error", {{"code", "bad_gateway"}, {"message", "upstream request failed"}}}});

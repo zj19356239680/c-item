@@ -25,6 +25,7 @@
 #include "apigate/config.hpp"
 #include "apigate/http_handler.hpp"
 #include "apigate/logging.hpp"
+#include "buffer_budget.hpp"
 #include "http_proxy.hpp"
 #include "http_server_internal.hpp"
 
@@ -267,12 +268,19 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
 
     HttpSession(tcp::socket socket, const AppConfig& config, StructuredLogger& logger,
                 std::shared_ptr<detail::ProxyAdmissionState> proxy_admission,
-                CloseCallback on_close)
+                std::shared_ptr<detail::BufferBudgetState> buffer_budget, CloseCallback on_close)
         : stream_(std::move(socket)),
           config_(config),
           logger_(logger),
           proxy_admission_(std::move(proxy_admission)),
+          buffer_budget_(std::move(buffer_budget)),
           on_close_(std::move(on_close)) {
+        if (!proxy_admission_) {
+            throw std::invalid_argument("proxy admission state must not be empty");
+        }
+        if (!buffer_budget_) {
+            throw std::invalid_argument("buffer budget must not be empty");
+        }
         if (!on_close_) {
             throw std::invalid_argument("session close callback must not be empty");
         }
@@ -343,8 +351,9 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         stream_.expires_after(request_timeout);
         http::async_read_header(
             stream_, buffer_, *parser_,
-            [self = shared_from_this()](const boost::system::error_code& error, std::size_t) {
-                self->on_read_header(error);
+            [self = shared_from_this()](const boost::system::error_code& error,
+                                        std::size_t) noexcept {
+                self->run_handler([self, &error] { self->on_read_header(error); });
             });
     }
 
@@ -379,15 +388,32 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         }
 
         parser_->body_limit(max_body_bytes);
-        if (parser_->is_done()) {
+        const std::optional<std::uint64_t> planned_content_length =
+            content_length ? std::optional<std::uint64_t>{*content_length} : std::nullopt;
+        const auto reservation = detail::plan_body_reservation(planned_content_length,
+                                                               parser_->is_done(), max_body_bytes);
+        if (reservation.kind == detail::BodyReservationKind::none) {
             process_request();
             return;
         }
+        if (reservation.kind == detail::BodyReservationKind::too_large) {
+            write_protocol_error(http::status::payload_too_large, "payload_too_large",
+                                 "request body is too large");
+            return;
+        }
+
+        auto permit = buffer_budget_->try_acquire(reservation.bytes);
+        if (!permit) {
+            reject_buffer_budget(request, reservation.bytes);
+            return;
+        }
+        request_body_permit_ = std::make_shared<detail::BufferBudgetPermit>(std::move(*permit));
 
         http::async_read(
             stream_, buffer_, *parser_,
-            [self = shared_from_this()](const boost::system::error_code& body_error, std::size_t) {
-                self->on_read_body(body_error);
+            [self = shared_from_this()](const boost::system::error_code& body_error,
+                                        std::size_t) noexcept {
+                self->run_handler([self, &body_error] { self->on_read_body(body_error); });
             });
     }
 
@@ -397,6 +423,13 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         }
         if (error) {
             handle_read_error(error);
+            return;
+        }
+        if (!parser_.has_value() || !request_body_permit_ ||
+            !request_body_permit_->shrink_to(
+                static_cast<std::uint64_t>(parser_->get().body().size()))) {
+            write_fallback_diagnostic("http_request_budget_shrink_failed", 0);
+            close_socket();
             return;
         }
         process_request();
@@ -464,6 +497,16 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         write_response(std::move(response));
     }
 
+    void reject_buffer_budget(const HttpRequest& request, std::uint64_t requested_bytes) {
+        auto response =
+            make_gateway_error_response(request, GatewayFailure::buffer_capacity_exhausted);
+        response.keep_alive(false);
+        log_buffer_budget_rejection("request", requested_bytes, response.result_int());
+        log_request_completed(request.method_string(), classify_http_route(request.target()),
+                              response.result_int());
+        write_response(std::move(response));
+    }
+
     void start_proxy_request(const HttpRequest& request) noexcept {
         std::shared_ptr<HttpProxyExchange> exchange;
         const auto method = request.method();
@@ -484,7 +527,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
                 return;
             }
             exchange = std::make_shared<HttpProxyExchange>(
-                stream_.get_executor(), config_.upstream.value(), request,
+                stream_.get_executor(), config_.upstream.value(), request, buffer_budget_,
+                request_body_permit_,
                 [weak_self = weak_from_this(), method](ProxyResult result) noexcept {
                     if (const auto self = weak_self.lock()) {
                         self->on_proxy_complete(method, std::move(result));
@@ -497,6 +541,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
                 });
             proxy_exchange_ = exchange;
             exchange->start();
+            parser_.reset();
+            request_body_permit_.reset();
         } catch (...) {
             if (exchange) {
                 exchange->cancel();
@@ -529,8 +575,12 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
             if (result.failure) {
                 log_proxy_failure(*result.failure, result.response.result_int());
             }
+            if (result.buffer_budget_rejected_bytes) {
+                log_buffer_budget_rejection("response", *result.buffer_budget_rejected_bytes,
+                                            result.response.result_int());
+            }
             log_request_completed(proxy_method_name(method), "proxy", result.response.result_int());
-            write_response(std::move(result.response));
+            write_response(std::move(result.response), std::move(result.body_permit));
         } catch (...) {
             write_fallback_diagnostic("http_proxy_completion_failed", 0);
             close_socket();
@@ -567,6 +617,20 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         }
     }
 
+    void log_buffer_budget_rejection(std::string_view direction, std::uint64_t requested_bytes,
+                                     unsigned int status) noexcept {
+        try {
+            logger_.warn("http_buffer_budget_rejected",
+                         {{"direction", direction},
+                          {"requested_bytes", requested_bytes},
+                          {"active_bytes", buffer_budget_->current_bytes()},
+                          {"max_bytes", buffer_budget_->max_bytes()},
+                          {"status", status}});
+        } catch (...) {
+            write_fallback_diagnostic("http_buffer_budget_log_failed", 0);
+        }
+    }
+
     void log_request_completed(std::string_view method, std::string_view route,
                                unsigned int status) noexcept {
         try {
@@ -579,19 +643,32 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         }
     }
 
-    void write_response(HttpResponse response) {
+    void write_response(HttpResponse response, detail::BufferBudgetPermit body_permit = {}) {
         phase_ = detail::SessionPhase::writing;
         if (draining_) {
             response.keep_alive(false);
         }
         const bool close_after_write = response.need_eof();
         response_.emplace(std::move(response));
+        response_body_permit_ = std::move(body_permit);
         stream_.expires_after(request_timeout);
         http::async_write(stream_, *response_,
                           [self = shared_from_this(), close_after_write](
-                              const boost::system::error_code& error, std::size_t) {
-                              self->on_write(error, close_after_write);
+                              const boost::system::error_code& error, std::size_t) noexcept {
+                              self->run_handler([self, close_after_write, &error] {
+                                  self->on_write(error, close_after_write);
+                              });
                           });
+    }
+
+    template <typename HandlerAction>
+    void run_handler(HandlerAction&& action) noexcept {
+        try {
+            std::forward<HandlerAction>(action)();
+        } catch (...) {
+            write_fallback_diagnostic("http_session_handler_exception", 0);
+            close_socket();
+        }
     }
 
     void on_write(const boost::system::error_code& error, bool close_after_write) {
@@ -599,6 +676,9 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
             return;
         }
         response_.reset();
+        response_body_permit_.release();
+        parser_.reset();
+        request_body_permit_.reset();
 
         switch (detail::classify_http_write_result(error, stopping_)) {
             case detail::HttpWriteDisposition::success:
@@ -655,11 +735,14 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     const AppConfig& config_;
     StructuredLogger& logger_;
     std::shared_ptr<detail::ProxyAdmissionState> proxy_admission_;
+    std::shared_ptr<detail::BufferBudgetState> buffer_budget_;
     CloseCallback on_close_;
     std::optional<http::request_parser<http::string_body>> parser_;
     std::optional<HttpResponse> response_;
+    detail::BufferBudgetPermit response_body_permit_;
     std::shared_ptr<HttpProxyExchange> proxy_exchange_;
     std::optional<detail::ProxyPermit> proxy_permit_;
+    std::shared_ptr<detail::BufferBudgetPermit> request_body_permit_;
     std::string remote_address_;
     std::size_t requests_served_{0};
     detail::SessionPhase phase_{detail::SessionPhase::reading};
@@ -682,6 +765,7 @@ class HttpServer::Impl {
           accept_capacity_(config.max_connections),
           proxy_admission_(
               std::make_shared<detail::ProxyAdmissionState>(config.max_concurrent_proxies)),
+          buffer_budget_(std::make_shared<detail::BufferBudgetState>(config.max_in_flight_bytes)),
           on_runtime_failure_(std::move(on_runtime_failure)),
           on_drain_complete_(std::move(on_drain_complete)) {
         if (!on_runtime_failure_) {
@@ -842,7 +926,7 @@ class HttpServer::Impl {
         }
 
         auto session = std::make_shared<HttpSession>(
-            std::move(socket), config_, logger_, proxy_admission_,
+            std::move(socket), config_, logger_, proxy_admission_, buffer_budget_,
             [this](HttpSession* closed_session) { remove_session(closed_session); });
         sessions_.insert(session);
         accept_capacity_.session_started();
@@ -1052,6 +1136,7 @@ class HttpServer::Impl {
     detail::AcceptCapacityState accept_capacity_;
     detail::DrainState drain_state_;
     std::shared_ptr<detail::ProxyAdmissionState> proxy_admission_;
+    std::shared_ptr<detail::BufferBudgetState> buffer_budget_;
     std::function<void()> on_runtime_failure_;
     std::function<void()> on_drain_complete_;
     detail::RuntimeFailureState runtime_failure_state_;

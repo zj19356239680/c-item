@@ -82,6 +82,16 @@ DELETE、OPTIONS、CONNECT 及其他方法返回 405。上游解析、连接、�
 `{"error":{"code":"gateway_overloaded","message":"proxy capacity is exhausted"}}`；
 响应不设置 `Retry-After`，本地健康端点不占用代理名额。
 
+`APIGATE_MAX_IN_FLIGHT_BYTES` 是进程内所有 session 和代理交换共享的**缓冲正文逻辑
+预约预算**。已知 `Content-Length` 的下游请求按长度预约，chunked 或未知长度请求按
+完整 64 KiB 预约；已知长度的上游响应按长度预约，chunked 或未知长度响应按完整
+1 MiB 预约。正文读完后，保守预约会缩减到实际大小。预算不足时不继续读取对应正文：
+下游请求返回 503 后强制关闭连接且不访问上游，上游响应则关闭该上游交换并返回 503；
+两者正文均为
+`{"error":{"code":"gateway_overloaded","message":"buffer capacity is exhausted"}}`，
+且不设置 `Retry-After`。permit 会保持到正文不再由解析器、代理请求或下游响应写入持有，
+正常完成、错误、断连、超时和停机取消都会自动归还。
+
 代理会移除请求和响应中的标准 hop-by-hop 头以及 `Connection` 动态列出的头，覆盖
 上游 `Host`，按缓冲后的实际正文重建 `Content-Length`，并将下游 `Server` 保持为
 `ApiGate`。`Content-Type`、`Authorization`、`Cookie` 等
@@ -91,8 +101,11 @@ DELETE、OPTIONS、CONNECT 及其他方法返回 405。上游解析、连接、�
 
 活动下游连接达到 `APIGATE_MAX_CONNECTIONS` 时，应用暂停发起新的 accept；已进入
 监听 backlog 的连接由操作系统排队，恢复容量后继续接收。这一背压策略不会主动向
-backlog 中的连接返回 HTTP 503，也不修改系统 backlog。两项限制约束对象数量，不是
-精确内存字节预算；默认值只是当前 MVP 的保守边界，不是生产容量或性能保证。
+backlog 中的连接返回 HTTP 503，也不修改系统 backlog。连接数、代理数与正文预约预算
+彼此独立，不能互相替代。正文预算不计 HTTP 头、socket 内核缓冲、Beast 固定缓冲、
+C++ 对象元数据、allocator 额外开销、本地小型 JSON 响应或日志缓冲，也不是 RSS、
+allocator 使用量或生产容量硬上限；正文复制和分配容量还可能使实际内存高于预约值。
+默认 64 MiB 未经生产负载测量，上线前仍需按真实流量测量并调整全部限制。
 
 收到 `SIGTERM` 或 `SIGINT` 后，服务立即停止 accept，并关闭空闲 keep-alive、部分请求
 及其他尚未分派的连接。已经分派的本地响应或上游代理交换可以在
@@ -166,6 +179,7 @@ bash scripts/check.sh
 | `APIGATE_LISTEN_PORT` | `8080` | 0–65535；0 由内核分配临时端口 |
 | `APIGATE_MAX_CONNECTIONS` | `256` | 1–65535；活动下游连接数上限 |
 | `APIGATE_MAX_CONCURRENT_PROXIES` | `32` | 1–65535；并发上游代理交换数上限 |
+| `APIGATE_MAX_IN_FLIGHT_BYTES` | `67108864` | 1–1073741824；全局缓冲正文预约预算，单位字节 |
 | `APIGATE_SHUTDOWN_GRACE_MS` | `5000` | 1–60000；信号排空期限，单位毫秒 |
 | `APIGATE_UPSTREAM_HOST` | 未设置 | 纯 DNS 主机名、IPv4 或 IPv6 字面地址；必须与端口同时设置 |
 | `APIGATE_UPSTREAM_PORT` | 未设置 | 1–65535；必须与主机同时设置 |
@@ -185,11 +199,12 @@ APIGATE_UPSTREAM_PORT=9001 \
 bash scripts/run.sh
 ```
 
-三项上游变量均未设置时代理关闭，原有未知 GET 的 404 及其他方法的 405 行为保持不变。两项容量配置
-始终校验；代理关闭时代理并发上限不被使用。配置检查结果会报告两个数值上限、
+三项上游变量均未设置时代理关闭，原有未知 GET 的 404 及其他方法的 405 行为保持不变。
+三项容量配置始终校验；代理关闭时代理并发上限不被使用。配置检查结果会报告
+`max_connections`、`max_concurrent_proxies`、`max_in_flight_bytes`、
 `shutdown_grace_ms`、`proxy_enabled` 和启用时的 `upstream_timeout_ms`，不会输出上游主机名。
 
-当前没有全局字节预算、每客户端/IP 限制或请求速率限制；也不支持其他代理方法、
+当前没有每客户端/IP 限制或请求速率限制；也不支持其他代理方法、
 流式上传、连接池、多上游、上游 TLS、HTTP/2、WebSocket 或预排空管理阶段。实际可承载数量
 仍受文件描述符、内存、CPU、请求/响应缓冲和操作系统 backlog 等因素约束。现有测试
 覆盖不构成生产容量或协议兼容性承诺。

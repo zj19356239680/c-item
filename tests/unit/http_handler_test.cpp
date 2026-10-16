@@ -169,6 +169,8 @@ TEST(HttpHandlerTest, CreatesSafeGatewayErrors) {
         apigate::make_gateway_error_response(request, apigate::GatewayFailure::gateway_timeout);
     const auto overloaded =
         apigate::make_gateway_error_response(request, apigate::GatewayFailure::gateway_overloaded);
+    const auto buffer_exhausted = apigate::make_gateway_error_response(
+        request, apigate::GatewayFailure::buffer_capacity_exhausted);
 
     EXPECT_EQ(bad_gateway.result(), http::status::bad_gateway);
     EXPECT_EQ(nlohmann::json::parse(bad_gateway.body()).at("error").at("code"), "bad_gateway");
@@ -186,6 +188,12 @@ TEST(HttpHandlerTest, CreatesSafeGatewayErrors) {
     EXPECT_EQ(overloaded[http::field::server], "ApiGate");
     EXPECT_TRUE(overloaded.keep_alive());
     EXPECT_EQ(overloaded.find(http::field::retry_after), overloaded.end());
+    EXPECT_EQ(buffer_exhausted.result(), http::status::service_unavailable);
+    EXPECT_EQ(nlohmann::json::parse(buffer_exhausted.body()).at("error").at("code"),
+              "gateway_overloaded");
+    EXPECT_EQ(nlohmann::json::parse(buffer_exhausted.body()).at("error").at("message"),
+              "buffer capacity is exhausted");
+    EXPECT_EQ(buffer_exhausted.find(http::field::retry_after), buffer_exhausted.end());
 }
 
 }  // namespace

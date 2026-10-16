@@ -24,6 +24,7 @@ class ConfigTest : public testing::Test {
         unsetenv("APIGATE_LISTEN_PORT");
         unsetenv("APIGATE_MAX_CONNECTIONS");
         unsetenv("APIGATE_MAX_CONCURRENT_PROXIES");
+        unsetenv("APIGATE_MAX_IN_FLIGHT_BYTES");
         unsetenv("APIGATE_SHUTDOWN_GRACE_MS");
         unsetenv("APIGATE_UPSTREAM_HOST");
         unsetenv("APIGATE_UPSTREAM_PORT");
@@ -41,8 +42,46 @@ TEST_F(ConfigTest, UsesSafeDefaults) {
     EXPECT_EQ(config.listen_port, 8080);
     EXPECT_EQ(config.max_connections, 256);
     EXPECT_EQ(config.max_concurrent_proxies, 32);
+    EXPECT_EQ(config.max_in_flight_bytes, 67108864U);
     EXPECT_EQ(config.shutdown_grace_ms, 5000U);
     EXPECT_FALSE(config.upstream.has_value());
+}
+
+TEST_F(ConfigTest, AcceptsInFlightByteBudgetBoundariesAndIntermediateValue) {
+    ASSERT_EQ(setenv("APIGATE_MAX_IN_FLIGHT_BYTES", "1", 1), 0);
+    EXPECT_EQ(apigate::load_config_from_environment().max_in_flight_bytes, 1U);
+
+    clear_environment();
+    ASSERT_EQ(setenv("APIGATE_MAX_IN_FLIGHT_BYTES", "123456789", 1), 0);
+    EXPECT_EQ(apigate::load_config_from_environment().max_in_flight_bytes, 123456789U);
+
+    clear_environment();
+    ASSERT_EQ(setenv("APIGATE_MAX_IN_FLIGHT_BYTES", "1073741824", 1), 0);
+    EXPECT_EQ(apigate::load_config_from_environment().max_in_flight_bytes, 1073741824U);
+}
+
+TEST_F(ConfigTest, RejectsInvalidInFlightByteBudgetWithoutEchoingValues) {
+    const char* invalid_values[] = {"",         "0",   "-1",  "1073741825",
+                                    "12suffix", " 12", "12 ", "18446744073709551616"};
+    for (const char* invalid_value : invalid_values) {
+        clear_environment();
+        ASSERT_EQ(setenv("APIGATE_MAX_IN_FLIGHT_BYTES", invalid_value, 1), 0);
+        try {
+            static_cast<void>(apigate::load_config_from_environment());
+            FAIL() << "invalid in-flight byte budget was accepted";
+        } catch (const apigate::ConfigError& error) {
+            if (*invalid_value == '\0') {
+                EXPECT_STREQ(error.what(), "APIGATE_MAX_IN_FLIGHT_BYTES must not be empty");
+            } else {
+                EXPECT_STREQ(error.what(),
+                             "APIGATE_MAX_IN_FLIGHT_BYTES must be an integer from 1 to "
+                             "1073741824");
+            }
+            if (std::string_view{invalid_value}.size() > 1) {
+                EXPECT_EQ(std::string{error.what()}.find(invalid_value), std::string::npos);
+            }
+        }
+    }
 }
 
 TEST_F(ConfigTest, AcceptsShutdownGraceBoundaries) {

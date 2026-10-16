@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -155,8 +156,7 @@ HttpRequest make_upstream_request(const UpstreamConfig& config, const HttpReques
     return upstream;
 }
 
-HttpResponse make_downstream_response(const HttpRequest& request,
-                                      const HttpResponse& upstream_response) {
+HttpResponse make_downstream_response(const HttpRequest& request, HttpResponse upstream_response) {
     HttpResponse response{upstream_response.result(), request.version()};
     response.reason(upstream_response.reason());
     const auto dynamic_tokens = connection_tokens(upstream_response.base());
@@ -170,7 +170,7 @@ HttpResponse make_downstream_response(const HttpRequest& request,
     }
     response.set(http::field::server, "ApiGate");
     response.keep_alive(request.keep_alive());
-    response.body() = upstream_response.body();
+    response.body() = std::move(upstream_response.body());
     response.prepare_payload();
     return response;
 }
@@ -180,15 +180,28 @@ HttpResponse make_downstream_response(const HttpRequest& request,
 class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExchange::Impl> {
    public:
     Impl(const asio::any_io_executor& executor, const UpstreamConfig& config,
-         const HttpRequest& request, CompletionCallback on_complete, AbortCallback on_abort)
+         const HttpRequest& request, std::shared_ptr<detail::BufferBudgetState> buffer_budget,
+         std::shared_ptr<detail::BufferBudgetPermit> request_body_permit,
+         CompletionCallback on_complete, AbortCallback on_abort)
         : resolver_(executor),
           stream_(executor),
           deadline_(executor),
           config_(config),
           downstream_request_(request),
           upstream_request_(detail::make_upstream_request(config, request)),
+          buffer_budget_(std::move(buffer_budget)),
+          request_body_permit_(std::move(request_body_permit)),
           on_complete_(std::move(on_complete)),
           on_abort_(std::move(on_abort)) {
+        if (!buffer_budget_) {
+            throw std::invalid_argument("buffer budget must not be empty");
+        }
+        if (!on_complete_) {
+            throw std::invalid_argument("proxy completion callback must not be empty");
+        }
+        if (!on_abort_) {
+            throw std::invalid_argument("proxy abort callback must not be empty");
+        }
         response_parser_.body_limit(max_upstream_body_bytes);
         response_parser_.header_limit(max_upstream_header_bytes);
     }
@@ -285,14 +298,64 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
             return;
         }
         begin_deadline();
-        http::async_read(stream_, buffer_, response_parser_,
-                         [self = shared_from_this()](const boost::system::error_code& read_error,
-                                                     std::size_t) noexcept {
-                             self->run_handler([self, &read_error] { self->on_read(read_error); });
-                         });
+        http::async_read_header(
+            stream_, buffer_, response_parser_,
+            [self = shared_from_this()](const boost::system::error_code& read_error,
+                                        std::size_t) noexcept {
+                self->run_handler([self, &read_error] { self->on_read_header(read_error); });
+            });
     }
 
-    void on_read(const boost::system::error_code& error) {
+    void on_read_header(const boost::system::error_code& error) {
+        if (completion_claimed()) {
+            return;
+        }
+        if (error) {
+            finish_deadline();
+            const auto stage = error == http::error::body_limit
+                                   ? ProxyFailureStage::response_too_large
+                                   : ProxyFailureStage::read;
+            fail(stage, error);
+            return;
+        }
+        if (response_parser_.get().result_int() < 200U) {
+            finish_deadline();
+            fail(ProxyFailureStage::invalid_response, {});
+            return;
+        }
+
+        const auto content_length = response_parser_.content_length();
+        const std::optional<std::uint64_t> planned_content_length =
+            content_length ? std::optional<std::uint64_t>{*content_length} : std::nullopt;
+        const auto plan = detail::plan_body_reservation(
+            planned_content_length, response_parser_.is_done(), max_upstream_body_bytes);
+        if (plan.kind == detail::BodyReservationKind::too_large) {
+            finish_deadline();
+            fail(ProxyFailureStage::response_too_large, http::error::body_limit);
+            return;
+        }
+        if (plan.kind == detail::BodyReservationKind::none) {
+            finish_deadline();
+            finish_response();
+            return;
+        }
+
+        auto permit = buffer_budget_->try_acquire(plan.bytes);
+        if (!permit) {
+            finish_deadline();
+            reject_buffer_budget(plan.bytes);
+            return;
+        }
+        response_body_permit_ = std::move(*permit);
+        http::async_read(
+            stream_, buffer_, response_parser_,
+            [self = shared_from_this()](const boost::system::error_code& read_error,
+                                        std::size_t) noexcept {
+                self->run_handler([self, &read_error] { self->on_read_body(read_error); });
+            });
+    }
+
+    void on_read_body(const boost::system::error_code& error) {
         if (completion_claimed()) {
             return;
         }
@@ -304,15 +367,29 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
             fail(stage, error);
             return;
         }
-
-        auto upstream_response = response_parser_.release();
-        if (upstream_response.result_int() < 200U) {
-            fail(ProxyFailureStage::invalid_response, {});
+        const auto actual_bytes = static_cast<std::uint64_t>(response_parser_.get().body().size());
+        if (!response_body_permit_.shrink_to(actual_bytes)) {
+            fail(ProxyFailureStage::read, {});
             return;
         }
+        finish_response();
+    }
+
+    void finish_response() {
+        auto upstream_response = response_parser_.release();
         close_upstream();
-        auto response = detail::make_downstream_response(downstream_request_, upstream_response);
-        complete(ProxyResult{std::move(response), std::nullopt});
+        auto response =
+            detail::make_downstream_response(downstream_request_, std::move(upstream_response));
+        ProxyResult result{std::move(response), std::nullopt, std::nullopt,
+                           std::move(response_body_permit_)};
+        complete(std::move(result));
+    }
+
+    void reject_buffer_budget(std::uint64_t requested_bytes) {
+        cancel_operations();
+        auto response = make_gateway_error_response(downstream_request_,
+                                                    GatewayFailure::buffer_capacity_exhausted);
+        complete(ProxyResult{std::move(response), std::nullopt, requested_bytes, {}});
     }
 
     void fail(ProxyFailureStage stage, const boost::system::error_code& error) {
@@ -324,7 +401,8 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
         const auto failure = stage == ProxyFailureStage::timeout ? GatewayFailure::gateway_timeout
                                                                  : GatewayFailure::bad_gateway;
         auto response = make_gateway_error_response(downstream_request_, failure);
-        complete(ProxyResult{std::move(response), ProxyFailure{stage, error.value()}});
+        complete(
+            ProxyResult{std::move(response), ProxyFailure{stage, error.value()}, std::nullopt, {}});
     }
 
     [[nodiscard]] bool completion_claimed() const noexcept { return completion_observed_; }
@@ -423,8 +501,11 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
     UpstreamConfig config_;
     HttpRequest downstream_request_;
     HttpRequest upstream_request_;
+    std::shared_ptr<detail::BufferBudgetState> buffer_budget_;
+    std::shared_ptr<detail::BufferBudgetPermit> request_body_permit_;
     beast::flat_buffer buffer_{max_upstream_header_bytes};
     http::response_parser<http::string_body> response_parser_;
+    detail::BufferBudgetPermit response_body_permit_;
     CompletionCallback on_complete_;
     AbortCallback on_abort_;
     detail::ProxyCompletionState completion_state_;
@@ -432,13 +513,16 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
     bool completion_observed_{false};
 };
 
-HttpProxyExchange::HttpProxyExchange(const asio::any_io_executor& executor,
-                                     const UpstreamConfig& config, const HttpRequest& request,
-                                     CompletionCallback on_complete, AbortCallback on_abort)
+HttpProxyExchange::HttpProxyExchange(
+    const asio::any_io_executor& executor, const UpstreamConfig& config, const HttpRequest& request,
+    std::shared_ptr<detail::BufferBudgetState> buffer_budget,
+    std::shared_ptr<detail::BufferBudgetPermit> request_body_permit, CompletionCallback on_complete,
+    AbortCallback on_abort)
     // Boost.Asio's resolver service calls its final shutdown hook during service destruction;
     // the analyzer reports this library-owned, non-polymorphic cleanup as virtual dispatch.
     // NOLINTNEXTLINE(clang-analyzer-optin.cplusplus.VirtualCall)
-    : impl_(std::make_shared<Impl>(executor, config, request, std::move(on_complete),
+    : impl_(std::make_shared<Impl>(executor, config, request, std::move(buffer_budget),
+                                   std::move(request_body_permit), std::move(on_complete),
                                    std::move(on_abort))) {}
 
 HttpProxyExchange::~HttpProxyExchange() = default;

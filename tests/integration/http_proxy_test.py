@@ -35,6 +35,13 @@ class UpstreamState:
         self.requests = queue.Queue()
         self.block_started = threading.Event()
         self.release_block = threading.Event()
+        self.known_header_sent = threading.Event()
+        self.release_known_body = threading.Event()
+        self.chunked_header_sent = threading.Event()
+        self.release_chunked_body = threading.Event()
+        self.blocked_body_started = threading.Event()
+        self.release_blocked_body = threading.Event()
+        self.response_marker = "response-marker-not-configured"
         self._request_count = 0
         self._lock = threading.Lock()
 
@@ -95,6 +102,63 @@ class ControlledUpstreamHandler(http.server.BaseHTTPRequestHandler):
                 return
             self._send_response(200, b'{"upstream":"released"}')
             return
+        if route == "/blocked-no-content":
+            state.block_started.set()
+            if not state.release_block.wait(timeout=10):
+                return
+            self._send_no_content()
+            return
+        if route == "/no-content":
+            self._send_no_content()
+            return
+        if route == "/budget-known":
+            body = (state.response_marker + "-" + "x" * 128).encode("ascii")
+            self.close_connection = True
+            self.connection.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                + b"Connection: close\r\n\r\n"
+            )
+            state.known_header_sent.set()
+            if state.release_known_body.wait(timeout=10):
+                try:
+                    self.connection.sendall(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            return
+        if route == "/budget-chunked":
+            body = (state.response_marker + "-chunked").encode("ascii")
+            self.close_connection = True
+            self.connection.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+                b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            )
+            state.chunked_header_sent.set()
+            if state.release_chunked_body.wait(timeout=10):
+                try:
+                    self.connection.sendall(
+                        f"{len(body):X}\r\n".encode("ascii")
+                        + body
+                        + b"\r\n0\r\n\r\n"
+                    )
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            return
+        if route == "/blocked-response-body":
+            body = b'{"held":"body"}'
+            self.close_connection = True
+            self.connection.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                + b"Connection: close\r\n\r\n"
+            )
+            state.blocked_body_started.set()
+            if state.release_blocked_body.wait(timeout=10):
+                try:
+                    self.connection.sendall(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            return
         if route == "/large":
             self._send_response(200, b"x" * (MAX_UPSTREAM_BODY + 1))
             return
@@ -135,6 +199,12 @@ class ControlledUpstreamHandler(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _send_no_content(self):
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
 
 class ControlledUpstream:
     def __init__(self):
@@ -154,13 +224,18 @@ class ControlledUpstream:
 
     def close(self):
         self.state.release_block.set()
+        self.state.release_known_body.set()
+        self.state.release_chunked_body.set()
+        self.state.release_blocked_body.set()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=3)
         assert not self.thread.is_alive(), "upstream server thread did not finish"
 
 
-def proxy_environment(upstream_port, timeout_ms="1000", max_proxies=None):
+def proxy_environment(
+    upstream_port, timeout_ms="1000", max_proxies=None, max_in_flight_bytes=None
+):
     environment = {
         "APIGATE_UPSTREAM_HOST": "127.0.0.1",
         "APIGATE_UPSTREAM_PORT": str(upstream_port),
@@ -168,6 +243,8 @@ def proxy_environment(upstream_port, timeout_ms="1000", max_proxies=None):
     }
     if max_proxies is not None:
         environment["APIGATE_MAX_CONCURRENT_PROXIES"] = str(max_proxies)
+    if max_in_flight_bytes is not None:
+        environment["APIGATE_MAX_IN_FLIGHT_BYTES"] = str(max_in_flight_bytes)
     return environment
 
 
@@ -533,7 +610,12 @@ def test_proxy_failures_are_bounded_and_service_survives(binary):
 
     upstream = ControlledUpstream()
     upstream.start()
-    service = ServiceProcess(binary, proxy_environment(upstream.port, "100", max_proxies=1))
+    service = ServiceProcess(
+        binary,
+        proxy_environment(
+            upstream.port, "100", max_proxies=1, max_in_flight_bytes=40
+        ),
+    )
     try:
         port = int(service.wait_for_event("http_listener_started")["port"])
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
@@ -544,6 +626,14 @@ def test_proxy_failures_are_bounded_and_service_survives(binary):
         assert timed_out.status == 504
         assert timeout_body["error"]["code"] == "gateway_timeout"
         upstream.state.release_block.set()
+
+        body_timed_out, body_timeout_payload = read_json_response(
+            connection, "GET", "/blocked-response-body"
+        )
+        assert upstream.state.blocked_body_started.is_set()
+        assert body_timed_out.status == 504
+        assert body_timeout_payload["error"]["code"] == "gateway_timeout"
+        upstream.state.release_blocked_body.set()
 
         too_large, large_body = read_json_response(
             connection, "PATCH", "/large", body=b"bounded-request"
@@ -557,7 +647,7 @@ def test_proxy_failures_are_bounded_and_service_survives(binary):
         assert recovered_body == {"upstream": "ok"}
         health, health_body = read_json_response(connection, "GET", "/healthz")
         assert health.status == 200 and health_body["status"] == "ok"
-        assert upstream.state.request_count() == 3
+        assert upstream.state.request_count() == 4
         connection.close()
         stop_service(service)
         records = assert_normal_log_output("".join(service.lines))
@@ -569,6 +659,8 @@ def test_proxy_failures_are_bounded_and_service_survives(binary):
         assert "timeout" in failure_stages
         assert "response_too_large" in failure_stages
     finally:
+        upstream.state.release_block.set()
+        upstream.state.release_blocked_body.set()
         service.cleanup()
         upstream.close()
 
@@ -732,6 +824,283 @@ def test_proxy_capacity_rejects_without_visiting_upstream(binary):
         if blocked_client is not None:
             blocked_client.join(timeout=5)
             assert not blocked_client.is_alive(), "blocked proxy client did not finish during cleanup"
+
+
+def test_global_buffer_budget(binary):
+    upstream = ControlledUpstream()
+    upstream.state.response_marker = "budget-response-" + secrets.token_hex(16)
+    upstream.start()
+    sensitive = {
+        "query": "budget-query-" + secrets.token_hex(16),
+        "authorization": "budget-authorization-" + secrets.token_hex(16),
+        "cookie": "budget-cookie-" + secrets.token_hex(16),
+        "request_body": "budget-request-body-" + secrets.token_hex(16),
+        "response_body": upstream.state.response_marker,
+    }
+    outputs = []
+    try:
+        service = ServiceProcess(
+            binary,
+            proxy_environment(upstream.port, max_in_flight_bytes=16),
+        )
+        try:
+            port = int(service.wait_for_event("http_listener_started")["port"])
+            before = upstream.state.request_count()
+            with socket.create_connection(("127.0.0.1", port), timeout=3) as client:
+                client.sendall(
+                    (
+                        "POST /known-rejected?credential="
+                        + sensitive["query"]
+                        + " HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer "
+                        + sensitive["authorization"]
+                        + "\r\nCookie: session="
+                        + sensitive["cookie"]
+                        + "\r\nContent-Length: 17\r\nConnection: keep-alive\r\n\r\n"
+                    ).encode("ascii")
+                )
+                response = http.client.HTTPResponse(client)
+                response.begin()
+                body = json.loads(response.read())
+                assert response.status == 503
+                assert body == {
+                    "error": {
+                        "code": "gateway_overloaded",
+                        "message": "buffer capacity is exhausted",
+                    }
+                }
+                assert response.getheader("Retry-After") is None
+                assert response.will_close
+                assert_peer_closed(client, timeout=1)
+            assert upstream.state.request_count() == before
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            connection.request("POST", "/no-content", body=b"0123456789abcdef")
+            accepted = connection.getresponse()
+            assert accepted.status == 204
+            assert accepted.read() == b""
+            connection.close()
+            assert upstream.state.request_count() == before + 1
+            stop_service(service)
+            output = "".join(service.lines)
+            outputs.append(output)
+            events = [
+                record["payload"]
+                for record in assert_normal_log_output(output)
+                if record["payload"].get("event") == "http_buffer_budget_rejected"
+            ]
+            assert len(events) == 1
+            assert events[0]["direction"] == "request"
+            assert events[0]["requested_bytes"] == 17
+            assert events[0]["active_bytes"] == 0
+            assert events[0]["max_bytes"] == 16
+            assert events[0]["status"] == 503
+        finally:
+            service.cleanup()
+
+        rejected_chunked = ServiceProcess(
+            binary,
+            proxy_environment(upstream.port, max_in_flight_bytes=MAX_DOWNSTREAM_BODY - 1),
+        )
+        try:
+            port = int(rejected_chunked.wait_for_event("http_listener_started")["port"])
+            before = upstream.state.request_count()
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            response, body = send_chunked_json_request(
+                connection,
+                "PATCH",
+                "/chunked-rejected?credential=" + sensitive["query"],
+                [sensitive["request_body"].encode("ascii")],
+                headers={
+                    "Authorization": "Bearer " + sensitive["authorization"],
+                    "Cookie": "session=" + sensitive["cookie"],
+                },
+            )
+            assert response.status == 503
+            assert body["error"]["message"] == "buffer capacity is exhausted"
+            assert response.will_close
+            connection.close()
+            assert upstream.state.request_count() == before
+            stop_service(rejected_chunked)
+            output = "".join(rejected_chunked.lines)
+            outputs.append(output)
+            events = [
+                record["payload"]
+                for record in assert_normal_log_output(output)
+                if record["payload"].get("event") == "http_buffer_budget_rejected"
+            ]
+            assert len(events) == 1
+            assert events[0]["direction"] == "request"
+            assert events[0]["requested_bytes"] == MAX_DOWNSTREAM_BODY
+        finally:
+            rejected_chunked.cleanup()
+
+        accepted_chunked = ServiceProcess(
+            binary,
+            proxy_environment(upstream.port, max_in_flight_bytes=MAX_DOWNSTREAM_BODY),
+        )
+        try:
+            port = int(accepted_chunked.wait_for_event("http_listener_started")["port"])
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            for suffix in ("first", "second"):
+                connection.request(
+                    "PATCH",
+                    "/no-content?case=" + suffix,
+                    body=[b"small", b"-chunked"],
+                    encode_chunked=True,
+                )
+                response = connection.getresponse()
+                assert response.status == 204
+                assert response.read() == b""
+            connection.close()
+            stop_service(accepted_chunked)
+            output = "".join(accepted_chunked.lines)
+            outputs.append(output)
+            assert_event_absent(output, "http_buffer_budget_rejected")
+        finally:
+            accepted_chunked.cleanup()
+
+        known_response = ServiceProcess(
+            binary,
+            proxy_environment(upstream.port, max_in_flight_bytes=64),
+        )
+        try:
+            port = int(known_response.wait_for_event("http_listener_started")["port"])
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            rejected, body = read_json_response(
+                connection,
+                "GET",
+                "/budget-known?credential=" + sensitive["query"],
+                headers={
+                    "Authorization": "Bearer " + sensitive["authorization"],
+                    "Cookie": "session=" + sensitive["cookie"],
+                },
+            )
+            assert upstream.state.known_header_sent.is_set()
+            assert rejected.status == 503
+            assert body["error"]["message"] == "buffer capacity is exhausted"
+            upstream.state.release_known_body.set()
+            health, health_body = read_json_response(connection, "GET", "/healthz")
+            assert health.status == 200 and health_body["status"] == "ok"
+            connection.close()
+            stop_service(known_response)
+            output = "".join(known_response.lines)
+            outputs.append(output)
+            records = assert_normal_log_output(output)
+            events = [
+                record["payload"]
+                for record in records
+                if record["payload"].get("event") == "http_buffer_budget_rejected"
+            ]
+            assert len(events) == 1
+            assert events[0]["direction"] == "response"
+            assert events[0]["requested_bytes"] > 64
+            assert_event_absent(output, "http_upstream_request_failed")
+        finally:
+            upstream.state.release_known_body.set()
+            known_response.cleanup()
+
+        chunked_response = ServiceProcess(
+            binary,
+            proxy_environment(upstream.port, max_in_flight_bytes=MAX_UPSTREAM_BODY - 1),
+        )
+        try:
+            port = int(chunked_response.wait_for_event("http_listener_started")["port"])
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            rejected, body = read_json_response(connection, "GET", "/budget-chunked")
+            assert upstream.state.chunked_header_sent.is_set()
+            assert rejected.status == 503
+            assert body["error"]["message"] == "buffer capacity is exhausted"
+            upstream.state.release_chunked_body.set()
+            health, health_body = read_json_response(connection, "GET", "/healthz")
+            assert health.status == 200 and health_body["status"] == "ok"
+            connection.close()
+            stop_service(chunked_response)
+            output = "".join(chunked_response.lines)
+            outputs.append(output)
+            records = assert_normal_log_output(output)
+            events = [
+                record["payload"]
+                for record in records
+                if record["payload"].get("event") == "http_buffer_budget_rejected"
+            ]
+            assert len(events) == 1
+            assert events[0]["direction"] == "response"
+            assert events[0]["requested_bytes"] == MAX_UPSTREAM_BODY
+            assert_event_absent(output, "http_upstream_request_failed")
+        finally:
+            upstream.state.release_chunked_body.set()
+            chunked_response.cleanup()
+
+        shared_service = ServiceProcess(
+            binary,
+            proxy_environment(upstream.port, max_in_flight_bytes=48),
+        )
+        first_result = queue.Queue()
+        first_client = None
+        try:
+            port = int(shared_service.wait_for_event("http_listener_started")["port"])
+
+            def hold_global_budget():
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                try:
+                    connection.request("POST", "/blocked-no-content", body=b"a" * 32)
+                    response = connection.getresponse()
+                    first_result.put((response.status, response.read()))
+                except (ConnectionError, http.client.HTTPException, socket.timeout) as error:
+                    first_result.put(error)
+                finally:
+                    connection.close()
+
+            first_client = threading.Thread(target=hold_global_budget)
+            first_client.start()
+            assert upstream.state.block_started.wait(timeout=3)
+            before = upstream.state.request_count()
+
+            second = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            rejected, body = read_json_response(
+                second, "POST", "/global-rejected", body=b"b" * 17
+            )
+            assert rejected.status == 503
+            assert body["error"]["message"] == "buffer capacity is exhausted"
+            second.close()
+            assert upstream.state.request_count() == before
+
+            upstream.state.release_block.set()
+            first_client.join(timeout=5)
+            assert not first_client.is_alive(), "budget holder did not finish"
+            assert first_result.get(timeout=1) == (204, b"")
+
+            recovered = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            recovered.request("POST", "/no-content", body=b"b" * 17)
+            recovered_response = recovered.getresponse()
+            assert recovered_response.status == 204
+            assert recovered_response.read() == b""
+            recovered.close()
+            stop_service(shared_service)
+            output = "".join(shared_service.lines)
+            outputs.append(output)
+            records = assert_normal_log_output(output)
+            events = [
+                record["payload"]
+                for record in records
+                if record["payload"].get("event") == "http_buffer_budget_rejected"
+            ]
+            assert len(events) == 1
+            assert events[0]["direction"] == "request"
+            assert events[0]["requested_bytes"] == 17
+            assert events[0]["active_bytes"] == 32
+            assert events[0]["max_bytes"] == 48
+        finally:
+            upstream.state.release_block.set()
+            shared_service.cleanup()
+            if first_client is not None:
+                first_client.join(timeout=5)
+                assert not first_client.is_alive(), "budget holder did not finish during cleanup"
+
+        combined_output = "".join(outputs)
+        assert_sensitive_values_absent(combined_output, sensitive)
+    finally:
+        upstream.close()
 
 
 def test_shutdown_drains_active_proxy(binary):
@@ -1040,6 +1409,7 @@ def main():
     test_proxy_failures_are_bounded_and_service_survives(binary)
     test_informational_responses_are_rejected(binary)
     test_proxy_capacity_rejects_without_visiting_upstream(binary)
+    test_global_buffer_budget(binary)
     test_shutdown_drains_active_proxy(binary)
     test_shutdown_deadline_forces_active_proxy(binary)
     test_second_signal_forces_active_proxy(binary)

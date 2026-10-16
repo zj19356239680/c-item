@@ -28,6 +28,7 @@ APIGATE_ENVIRONMENT_VARIABLES = (
     "APIGATE_LISTEN_PORT",
     "APIGATE_MAX_CONNECTIONS",
     "APIGATE_MAX_CONCURRENT_PROXIES",
+    "APIGATE_MAX_IN_FLIGHT_BYTES",
     "APIGATE_SHUTDOWN_GRACE_MS",
     "APIGATE_UPSTREAM_HOST",
     "APIGATE_UPSTREAM_PORT",
@@ -401,6 +402,7 @@ def test_command_line(binary, expected_version):
     assert "APIGATE_UPSTREAM_TIMEOUT_MS" in help_result.stdout
     assert "APIGATE_MAX_CONNECTIONS" in help_result.stdout
     assert "APIGATE_MAX_CONCURRENT_PROXIES" in help_result.stdout
+    assert "APIGATE_MAX_IN_FLIGHT_BYTES" in help_result.stdout
     assert "APIGATE_SHUTDOWN_GRACE_MS" in help_result.stdout
     assert not help_result.stderr
 
@@ -845,6 +847,7 @@ def test_port_conflict_and_config_check(binary):
                 "APIGATE_LISTEN_PORT": str(port),
                 "APIGATE_MAX_CONNECTIONS": "17",
                 "APIGATE_MAX_CONCURRENT_PROXIES": "9",
+                "APIGATE_MAX_IN_FLIGHT_BYTES": "123456789",
                 "APIGATE_SHUTDOWN_GRACE_MS": "1234",
             }
         )
@@ -890,6 +893,7 @@ def test_port_conflict_and_config_check(binary):
             assert payload["listen_port"] == port
             assert payload["max_connections"] == 17
             assert payload["max_concurrent_proxies"] == 9
+            assert payload["max_in_flight_bytes"] == 123456789
             assert payload["shutdown_grace_ms"] == 1234
             assert payload["proxy_enabled"] is False
             assert "upstream_timeout_ms" not in payload
@@ -916,6 +920,35 @@ def test_port_conflict_and_config_check(binary):
         assert record["category"] == "configuration"
         assert isinstance(record.get("message"), str)
         assert record["message"]
+
+        invalid_byte_budgets = (
+            "",
+            "0",
+            "-1",
+            "1073741825",
+            "12suffix",
+            "18446744073709551616",
+        )
+        for invalid_value in invalid_byte_budgets:
+            invalid_environment = environment.copy()
+            invalid_environment["APIGATE_MAX_IN_FLIGHT_BYTES"] = invalid_value
+            invalid_budget = subprocess.run(
+                [binary, "--check-config"],
+                env=invalid_environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                check=False,
+            )
+            assert invalid_budget.returncode != 0
+            assert not invalid_budget.stdout
+            assert "http_listener_started" not in invalid_budget.stderr
+            if len(invalid_value) > 1:
+                assert invalid_value not in invalid_budget.stderr
+            record = parse_single_json_log(invalid_budget.stderr)
+            assert record["event"] == "bootstrap_failed"
+            assert record["category"] == "configuration"
 
 
 def main():
