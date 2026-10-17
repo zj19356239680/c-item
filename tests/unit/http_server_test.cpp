@@ -79,6 +79,13 @@ TEST(HttpWriteDispositionTest, ClassifiesUnexpectedErrors) {
               HttpWriteDisposition::unexpected_error);
 }
 
+TEST(HttpWriteDispositionTest, DoesNotSilenceBadDescriptor) {
+    const boost::system::error_code bad_descriptor = asio::error::bad_descriptor;
+
+    EXPECT_EQ(classify_http_write_result(bad_descriptor, false),
+              HttpWriteDisposition::unexpected_error);
+}
+
 TEST(AcceptRetryDispositionTest, RetriesAfterSuccessfulCompletion) {
     EXPECT_EQ(classify_accept_retry_completion({}, false), AcceptRetryDisposition::retry);
 }

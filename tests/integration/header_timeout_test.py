@@ -2,7 +2,6 @@
 
 """Observe idle/slow initial headers concurrently, with the production 10s deadline."""
 
-import errno
 import http.client
 import json
 import os
@@ -31,7 +30,6 @@ FRAGMENT_INTERVAL_SECONDS = 0.5
 def observe_timeouts(idle, slow, queued, accepted_at, connected_at):
     sockets = {idle: "idle", slow: "slow", queued: "queued"}
     closed_at = {}
-    received = {"idle": bytearray(), "slow": bytearray()}
     next_fragment = accepted_at + FRAGMENT_INTERVAL_SECONDS
     last_fragment_at = None
     fragment_count = 0
@@ -57,20 +55,13 @@ def observe_timeouts(idle, slow, queued, accepted_at, connected_at):
                 data = client.recv(4096)
             except ConnectionResetError:
                 data = b""
-            if data:
-                received[name].extend(data)
-                assert len(received[name]) <= 4096, "unexpected timeout response length"
-                continue
+            assert not data, "a timed-out request unexpectedly received an HTTP response"
             closed_at[name] = observed_at
             del sockets[client]
             elapsed = observed_at - connected_at[name]
             assert elapsed >= READ_TIMEOUT_SECONDS - EARLY_MARGIN_SECONDS, (
                 f"{name} connection closed too early after {elapsed:.2f}s"
             )
-            if received[name]:
-                # The existing mapping attempts a safe 400; timeout may instead
-                # close the socket before any response can be written. No 408 required.
-                assert bytes(received[name]).startswith(b"HTTP/1.1 400 ")
 
         now = time.monotonic()
         if "slow" not in closed_at and now >= next_fragment:
@@ -127,30 +118,17 @@ def verify_logs(service, sensitive):
     assert len(capacity) >= 2
 
     rejected = [payload for payload in payloads if payload["event"] == "http_request_rejected"]
-    read_errors = [payload for payload in rejected if "error_code" in payload]
-    assert len(read_errors) == 2
-    # boost::beast::error::timeout is 1 in the repository's pinned dependency.
-    assert all(payload["error_code"] == 1 for payload in read_errors)
-    mapped_errors = [payload for payload in rejected if "reason" in payload]
-    assert len(mapped_errors) == 2
-    assert all(payload["reason"] == "bad_request" and payload["status"] == 400
-               for payload in mapped_errors)
-
-    # Known current diagnostic: read timeout closes the stream, then the attempted
-    # 400 write can log EBADF. Record this baseline explicitly, without treating
-    # other write errors, fatal events or accept errors as expected cancellations.
-    write_errors = [record for record in records
-                    if record["payload"]["event"] == "http_response_write_failed"]
-    assert len(write_errors) <= 2
-    assert all(record["payload"]["error_code"] == errno.EBADF for record in write_errors)
-    assert all(record["level"] != "critical" for record in records)
-    assert all(record["level"] != "error"
-               or record["payload"]["event"] == "http_response_write_failed"
-               for record in records)
+    assert len(rejected) == 2, "each timed-out session must produce exactly one diagnostic"
+    assert all(payload.get("reason") == "read_timeout" for payload in rejected)
+    assert all("status" not in payload for payload in rejected)
+    assert all(record["level"] not in ("error", "critical") for record in records)
     for event in ("http_accept_failed", "http_accept_retry_failed",
-                  "shutdown_drain_timed_out", "shutdown_force_requested"):
+                  "http_response_write_failed", "shutdown_drain_timed_out",
+                  "shutdown_force_requested"):
         assert_event_absent(output, event)
-    first_rejection = events.index("http_request_rejected")
+    first_rejection = next(index for index, payload in enumerate(payloads)
+                           if payload["event"] == "http_request_rejected"
+                           and payload.get("reason") == "read_timeout")
     resumed = events.index("http_accept_resumed_capacity")
     completed = events.index("http_request_completed")
     assert first_rejection < resumed < completed
@@ -169,7 +147,6 @@ def verify_logs(service, sensitive):
     assert len(drain) == 1 and drain[0]["active_sessions"] == 2
     stopped = [payload for payload in payloads if payload["event"] == "service_stopped"]
     assert len(stopped) == 1 and stopped[0]["exit_code"] == 0
-    return len(write_errors)
 
 
 def test_header_timeouts(binary):
@@ -221,10 +198,10 @@ def test_header_timeouts(binary):
             for fresh in fresh_clients:
                 assert_peer_closed(fresh, timeout=1)
             service.finish_log_reader()
-            write_errors = verify_logs(service, sensitive)
+            verify_logs(service, sensitive)
             elapsed = {name: round(closed_at[name] - connected_at[name], 3) for name in closed_at}
             print(f"header timeout regression passed: closure_seconds={elapsed}, "
-                  f"paced_fragments={fragments}, known_timeout_write_diagnostics={write_errors}")
+                  f"paced_fragments={fragments}, timeout_diagnostics=2, write_failures=0")
     finally:
         service.cleanup()
         assert service.process.poll() is not None

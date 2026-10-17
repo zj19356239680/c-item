@@ -476,6 +476,11 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
             close_socket();
             return;
         }
+        if (error == beast::error::timeout) {
+            logger_.warn("http_request_rejected", {{"reason", "read_timeout"}});
+            close_socket();
+            return;
+        }
         if (error == http::error::body_limit) {
             write_protocol_error(http::status::payload_too_large, "payload_too_large",
                                  "request body is too large");

@@ -62,7 +62,10 @@ curl -fsS http://127.0.0.1:8080/readyz
 时 POST、PUT、PATCH 也继续返回 405。正常响应设置 `Server: ApiGate`、
 `Content-Type: application/json` 和 `Cache-Control: no-store`；
 正文长度及连接头由 HTTP 库按请求生成。请求头超过 8 KiB 返回 431，正文超过
-64 KiB 返回 413；格式错误请求可能返回 400 或直接断开。当前行为尚未制定版本化的
+64 KiB 返回 413；格式错误请求可能返回 400 或直接断开。一次请求的头部和正文共享
+10 秒读取期限，持续发送片段不会刷新该期限。读取超时记录安全的
+`http_request_rejected` / `reason=read_timeout` 并直接关闭连接，不尝试写 HTTP 错误响应，
+也不承诺返回错误正文。当前行为尚未制定版本化的
 API 兼容承诺，具体设计边界见[设计文档](设计文档.md)。
 
 同时设置 `APIGATE_UPSTREAM_HOST` 和 `APIGATE_UPSTREAM_PORT` 后，除
