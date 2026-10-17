@@ -8,6 +8,7 @@ import queue
 import secrets
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -161,6 +162,11 @@ class ControlledUpstreamHandler(http.server.BaseHTTPRequestHandler):
             return
         if route == "/large":
             self._send_response(200, b"x" * (MAX_UPSTREAM_BODY + 1))
+            return
+        if route == "/write-full":
+            self.connection.settimeout(3)
+            body = state.response_marker.encode("ascii").ljust(MAX_UPSTREAM_BODY, b"w")
+            self._send_response(200, body)
             return
         self.send_response(201)
         self.send_header("Content-Type", "application/json")
@@ -1103,6 +1109,94 @@ def test_global_buffer_budget(binary):
         upstream.close()
 
 
+def test_downstream_reset_recovers_full_response_budget(binary):
+    upstream = ControlledUpstream()
+    upstream.state.response_marker = "write-response-" + secrets.token_hex(16)
+    expected = upstream.state.response_marker.encode("ascii").ljust(MAX_UPSTREAM_BODY, b"w")
+    upstream.start()
+    service = None
+    try:
+        service = ServiceProcess(
+            binary,
+            proxy_environment(upstream.port, max_proxies=16, max_in_flight_bytes=MAX_UPSTREAM_BODY),
+        )
+        port = int(service.wait_for_event("http_listener_started")["port"])
+        request_count = 0
+        for _ in range(3):
+            # A real process reset regression. Header receipt proves the proxy has
+            # buffered the upstream response, but does NOT prove async_write is
+            # pending: that stronger property is tested by SessionWriteRegressionTest.
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+                client.settimeout(3)
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                client.connect(("127.0.0.1", port))
+                client.sendall(
+                    b"GET /write-full HTTP/1.1\r\nHost: localhost\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
+                request_count += 1
+                with http.client.HTTPResponse(client) as response:
+                    response.begin()
+                    assert response.status == 200
+                    assert int(response.getheader("Content-Length")) == MAX_UPSTREAM_BODY
+                    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+
+            deadline = time.monotonic() + 5
+            while True:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, "full response budget was not reusable after reset"
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=remaining)
+                try:
+                    connection.request("GET", "/write-full")
+                    recovered = connection.getresponse()
+                    body = recovered.read()
+                    request_count += 1
+                    if recovered.status == 200:
+                        assert body == expected, "recovered upstream response content differed"
+                        break
+                    assert recovered.status == 503
+                    assert json.loads(body) == {
+                        "error": {
+                            "code": "gateway_overloaded",
+                            "message": "buffer capacity is exhausted",
+                        }
+                    }
+                finally:
+                    connection.close()
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            try:
+                health, body = read_json_response(connection, "GET", "/healthz")
+                request_count += 1
+                assert health.status == 200 and body["status"] == "ok"
+            finally:
+                connection.close()
+
+        stop_service(service)
+        output = "".join(service.lines)
+        records = assert_normal_log_output(output)
+        assert all(record["level"] not in ("error", "critical") for record in records)
+        for event in (
+            "http_proxy_rejected_capacity",
+            "http_upstream_request_failed",
+            "http_response_write_failed",
+            "http_accept_retry_failed",
+        ):
+            assert_event_absent(output, event)
+        completions = [
+            record for record in records
+            if record["payload"].get("event") == "http_request_completed"
+        ]
+        assert len(completions) == request_count, "request completion count differed"
+        assert_sensitive_values_absent(output, {"response_body": upstream.state.response_marker})
+    finally:
+        try:
+            if service is not None:
+                service.cleanup()
+        finally:
+            upstream.close()
+
+
 def test_shutdown_drains_active_proxy(binary):
     for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
         upstream = ControlledUpstream()
@@ -1410,6 +1504,7 @@ def main():
     test_informational_responses_are_rejected(binary)
     test_proxy_capacity_rejects_without_visiting_upstream(binary)
     test_global_buffer_budget(binary)
+    test_downstream_reset_recovers_full_response_budget(binary)
     test_shutdown_drains_active_proxy(binary)
     test_shutdown_deadline_forces_active_proxy(binary)
     test_second_signal_forces_active_proxy(binary)

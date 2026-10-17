@@ -80,6 +80,16 @@ if(BUILD_TESTING)
     apigate_set_project_options(apigate_unit_tests)
     include(GoogleTest)
     gtest_discover_tests(apigate_unit_tests)
+    # Compile a separate copy with test-only access to real HttpSession state.
+    # apigate_core and the production executable do not enable this seam.
+    add_executable(apigate_session_write_tests
+        tests/unit/http_session_write_test.cpp src/http_server.cpp)
+    target_compile_definitions(apigate_session_write_tests PRIVATE APIGATE_HTTP_SESSION_TESTING)
+    target_include_directories(apigate_session_write_tests PRIVATE
+        "${PROJECT_SOURCE_DIR}/src" "${PROJECT_SOURCE_DIR}/tests/support")
+    target_link_libraries(apigate_session_write_tests PRIVATE apigate_core GTest::gtest_main)
+    apigate_set_project_options(apigate_session_write_tests)
+    gtest_discover_tests(apigate_session_write_tests PROPERTIES TIMEOUT 20)
     add_test(NAME integration.config_check COMMAND api-gate --check-config)
     add_test(NAME integration.service_lifecycle
         COMMAND bash ${PROJECT_SOURCE_DIR}/tests/integration/service_lifecycle.sh

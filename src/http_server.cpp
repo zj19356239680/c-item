@@ -29,6 +29,10 @@
 #include "http_proxy.hpp"
 #include "http_server_internal.hpp"
 
+#ifdef APIGATE_HTTP_SESSION_TESTING
+#include "http_session_probe.hpp"
+#endif
+
 namespace apigate {
 
 namespace detail {
@@ -290,6 +294,13 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
     }
 
     void start() { read_request(); }
+
+#ifdef APIGATE_HTTP_SESSION_TESTING
+    [[nodiscard]] detail::SessionWriteSnapshot write_snapshot() const noexcept {
+        return {!finished_ && phase_ == detail::SessionPhase::writing && response_.has_value(),
+                response_ ? response_->body().size() : 0};
+    }
+#endif
 
     void begin_drain() noexcept {
         if (draining_ || finished_) {
@@ -752,6 +763,19 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
 };
 
 }  // namespace
+
+#ifdef APIGATE_HTTP_SESSION_TESTING
+detail::SessionWriteProbe detail::start_session_write_probe(
+    tcp::socket socket, const AppConfig& config, StructuredLogger& logger,
+    std::shared_ptr<ProxyAdmissionState> admission, std::shared_ptr<BufferBudgetState> budget,
+    std::function<void()> on_close) {
+    auto session = std::make_shared<HttpSession>(
+        std::move(socket), config, logger, std::move(admission), std::move(budget),
+        [on_close = std::move(on_close)](HttpSession*) { on_close(); });
+    session->start();
+    return {[session] { return session->write_snapshot(); }, [session] { session->stop(); }};
+}
+#endif
 
 class HttpServer::Impl {
    public:
