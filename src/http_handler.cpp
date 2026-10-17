@@ -65,27 +65,50 @@ std::string_view classify_http_route(std::string_view target) noexcept {
 }
 
 bool should_proxy_http_request(const AppConfig& config, const HttpRequest& request) noexcept {
-    if (!config.upstream || !is_supported_proxy_method(request.method())) {
-        return false;
+    return select_http_upstream(config, request) != nullptr;
+}
+
+const UpstreamConfig* select_http_upstream(const AppConfig& config,
+                                           const HttpRequest& request) noexcept {
+    if (!is_supported_proxy_method(request.method())) {
+        return nullptr;
     }
     const std::string_view target{request.target().data(), request.target().size()};
     if (classify_http_route(target) != "unmatched") {
-        return false;
+        return nullptr;
     }
-    return is_supported_proxy_target(target) && !requests_upgrade(request) &&
-           (request.method() != http::verb::get || request.body().empty());
+    if (!is_supported_proxy_target(target) || requests_upgrade(request) ||
+        (request.method() == http::verb::get && !request.body().empty())) {
+        return nullptr;
+    }
+    if (config.upstream) {
+        return &*config.upstream;
+    }
+    const auto path = request_path(target);
+    const UpstreamConfig* selected = nullptr;
+    std::size_t longest = 0;
+    for (const auto& route : config.routes) {
+        const auto& prefix = route.prefix;
+        if (prefix.size() > longest && path.starts_with(prefix) &&
+            (prefix == "/" || path.size() == prefix.size() || path[prefix.size()] == '/')) {
+            selected = &route.upstream;
+            longest = prefix.size();
+        }
+    }
+    return selected;
 }
 
 HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& request) {
     const std::string_view target{request.target().data(), request.target().size()};
     const auto route = classify_http_route(target);
+    const bool proxy_enabled = config.upstream.has_value() || !config.routes.empty();
     if (route != "unmatched" && request.method() != http::verb::get) {
         return make_method_not_allowed(request, false);
     }
     if (!is_supported_proxy_method(request.method())) {
-        return make_method_not_allowed(request, config.upstream.has_value());
+        return make_method_not_allowed(request, proxy_enabled);
     }
-    if (config.upstream && requests_upgrade(request)) {
+    if (proxy_enabled && requests_upgrade(request)) {
         return make_json_response(
             request, http::status::bad_request,
             {{"error",
@@ -99,11 +122,11 @@ HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& req
         return make_json_response(request, http::status::ok,
                                   {{"status", "ready"}, {"service", config.service_name}});
     }
-    if (!config.upstream && request.method() != http::verb::get) {
+    if (!proxy_enabled && request.method() != http::verb::get) {
         return make_method_not_allowed(request, false);
     }
-    if (config.upstream && (!is_supported_proxy_target(target) ||
-                            (request.method() == http::verb::get && !request.body().empty()))) {
+    if (proxy_enabled && (!is_supported_proxy_target(target) ||
+                          (request.method() == http::verb::get && !request.body().empty()))) {
         return make_json_response(
             request, http::status::bad_request,
             {{"error",

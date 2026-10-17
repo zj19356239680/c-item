@@ -6,7 +6,9 @@
 #include <charconv>
 #include <cstdlib>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <optional>
+#include <set>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -19,9 +21,13 @@ constexpr std::size_t max_hostname_length = 253;
 constexpr std::uint32_t max_timeout_ms = 60000;
 constexpr std::uint64_t max_in_flight_bytes_limit = 1073741824;
 
-[[nodiscard]] std::optional<std::string> read_environment(const char* name) {
+[[nodiscard]] const char* raw_environment(const char* name) {
     // Configuration is loaded once, before any worker threads can mutate the environment.
-    const char* value = std::getenv(name);  // NOLINT(concurrency-mt-unsafe)
+    return std::getenv(name);  // NOLINT(concurrency-mt-unsafe)
+}
+
+[[nodiscard]] std::optional<std::string> read_environment(const char* name) {
+    const char* value = raw_environment(name);
     if (value == nullptr) {
         return std::nullopt;
     }
@@ -168,6 +174,119 @@ void validate_dns_hostname(std::string_view value) {
     return std::string{value};
 }
 
+void validate_route_prefix(std::string_view prefix) {
+    if (prefix.empty() || prefix.front() != '/') {
+        throw ConfigError("APIGATE_ROUTES prefix must start with '/'");
+    }
+    if (prefix == "/") {
+        return;
+    }
+    std::size_t begin = 1;
+    while (begin <= prefix.size()) {
+        const auto end = prefix.find('/', begin);
+        const auto segment =
+            prefix.substr(begin, end == std::string_view::npos ? end : end - begin);
+        const bool valid = std::ranges::all_of(segment, [](char character) {
+            return (character >= 'a' && character <= 'z') ||
+                   (character >= 'A' && character <= 'Z') ||
+                   (character >= '0' && character <= '9') || character == '-' || character == '.' ||
+                   character == '_' || character == '~';
+        });
+        if (segment.empty() || segment == "." || segment == ".." || !valid) {
+            throw ConfigError("APIGATE_ROUTES prefix contains an invalid path segment");
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        begin = end + 1;
+    }
+}
+
+[[nodiscard]] std::uint64_t route_integer(const nlohmann::json& value, std::uint64_t maximum) {
+    if (!value.is_number_integer() ||
+        (!value.is_number_unsigned() && value.get<std::int64_t>() < 0)) {
+        throw ConfigError("APIGATE_ROUTES port and timeout_ms must be positive integers");
+    }
+    const auto number = value.get<std::uint64_t>();
+    if (number == 0 || number > maximum) {
+        throw ConfigError("APIGATE_ROUTES port or timeout_ms is out of range");
+    }
+    return number;
+}
+
+[[nodiscard]] std::vector<RouteConfig> parse_routes(std::string_view value) {
+    if (value.size() > std::size_t{64} * 1024) {
+        throw ConfigError("APIGATE_ROUTES must not exceed 65536 bytes");
+    }
+    using Json = nlohmann::json;
+    std::set<std::string> keys;
+    std::size_t object_count = 0;
+    const auto callback = [&keys, &object_count](int depth, Json::parse_event_t event,
+                                                 Json& parsed) {
+        if (event == Json::parse_event_t::array_start && depth != 0) {
+            throw ConfigError("APIGATE_ROUTES must be an array of flat route objects");
+        }
+        if (event == Json::parse_event_t::object_start) {
+            if (depth != 1 || ++object_count > 32) {
+                throw ConfigError("APIGATE_ROUTES must contain at most 32 flat route objects");
+            }
+            keys.clear();
+        }
+        if (event == Json::parse_event_t::key && !keys.insert(parsed.get<std::string>()).second) {
+            throw ConfigError("APIGATE_ROUTES contains a duplicate object field");
+        }
+        return true;
+    };
+    Json document;
+    try {
+        document = Json::parse(value, callback);
+    } catch (const Json::exception&) {
+        throw ConfigError("APIGATE_ROUTES must contain valid JSON");
+    }
+    if (!document.is_array() || document.empty() || document.size() > 32) {
+        throw ConfigError("APIGATE_ROUTES must contain 1-32 route objects");
+    }
+    std::vector<RouteConfig> routes;
+    std::set<std::string> prefixes;
+    for (const auto& entry : document) {
+        if (!entry.is_object() || !entry.contains("prefix") || !entry.contains("host") ||
+            !entry.contains("port")) {
+            throw ConfigError("APIGATE_ROUTES entry requires prefix, host and port");
+        }
+        for (const auto& item : entry.items()) {
+            if (item.key() != "prefix" && item.key() != "host" && item.key() != "port" &&
+                item.key() != "timeout_ms") {
+                throw ConfigError("APIGATE_ROUTES entry contains an unknown field");
+            }
+        }
+        if (!entry.at("prefix").is_string() || !entry.at("host").is_string()) {
+            throw ConfigError("APIGATE_ROUTES prefix and host must be strings");
+        }
+        auto prefix = entry.at("prefix").get<std::string>();
+        validate_route_prefix(prefix);
+        if (!prefixes.insert(prefix).second) {
+            throw ConfigError("APIGATE_ROUTES contains a duplicate prefix");
+        }
+        const auto host = entry.at("host").get<std::string>();
+        std::string validated_host;
+        try {
+            if (host.empty()) {
+                throw ConfigError("empty host");
+            }
+            validated_host = parse_upstream_host(host);
+        } catch (const ConfigError&) {
+            throw ConfigError("APIGATE_ROUTES host must be a valid hostname or IP address");
+        }
+        const auto port = static_cast<std::uint16_t>(route_integer(entry.at("port"), 65535));
+        const auto timeout =
+            entry.contains("timeout_ms")
+                ? static_cast<std::uint32_t>(route_integer(entry.at("timeout_ms"), 60000))
+                : 3000U;
+        routes.push_back({std::move(prefix), {std::move(validated_host), port, timeout}});
+    }
+    return routes;
+}
+
 }  // namespace
 
 AppConfig load_config_from_environment() {
@@ -203,6 +322,16 @@ AppConfig load_config_from_environment() {
         config.shutdown_grace_ms = parse_bounded_milliseconds(*value, "APIGATE_SHUTDOWN_GRACE_MS");
     }
 
+    if (raw_environment("APIGATE_ROUTES") != nullptr &&
+        (raw_environment("APIGATE_UPSTREAM_HOST") != nullptr ||
+         raw_environment("APIGATE_UPSTREAM_PORT") != nullptr ||
+         raw_environment("APIGATE_UPSTREAM_TIMEOUT_MS") != nullptr)) {
+        throw ConfigError("APIGATE_ROUTES conflicts with legacy upstream variables");
+    }
+    if (const auto routes = read_environment("APIGATE_ROUTES")) {
+        config.routes = parse_routes(*routes);
+        return config;
+    }
     const auto upstream_host = read_environment("APIGATE_UPSTREAM_HOST");
     const auto upstream_port = read_environment("APIGATE_UPSTREAM_PORT");
     const auto upstream_timeout = read_environment("APIGATE_UPSTREAM_TIMEOUT_MS");

@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <boost/beast/http.hpp>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -194,6 +195,83 @@ TEST(HttpHandlerTest, CreatesSafeGatewayErrors) {
     EXPECT_EQ(nlohmann::json::parse(buffer_exhausted.body()).at("error").at("message"),
               "buffer capacity is exhausted");
     EXPECT_EQ(buffer_exhausted.find(http::field::retry_after), buffer_exhausted.end());
+}
+
+TEST(HttpHandlerTest, SelectsLongestRawPathOnSegmentBoundariesRegardlessOfOrder) {
+    apigate::AppConfig config;
+    config.routes = {{"/users", {"users", 8001, 100}},
+                     {"/users/admin", {"admins", 8002, 200}},
+                     {"/orders", {"orders", 8003, 300}},
+                     {"/", {"fallback", 8004, 400}}};
+    const std::pair<const char*, const char*> cases[] = {
+        {"/users", "users"},
+        {"/users/42?next=/orders", "users"},
+        {"/users/admin", "admins"},
+        {"/users/admin/42", "admins"},
+        {"/users/admin-extra", "users"},
+        {"/users-extra", "fallback"},
+        {"/orders/42", "orders"},
+        {"/Users", "fallback"},
+        {"/u%73ers", "fallback"},
+        {"/users%2f42", "fallback"},
+        {"/users/../orders", "users"},
+        {"/", "fallback"},
+    };
+    for (int order = 0; order < 2; ++order) {
+        for (const auto& [target, host] : cases) {
+            const auto request = make_request(http::verb::get, target);
+            const auto* selected = apigate::select_http_upstream(config, request);
+            ASSERT_NE(selected, nullptr);
+            EXPECT_EQ(selected->host, host);
+        }
+        std::ranges::reverse(config.routes);
+    }
+    for (const char* target : {"/healthz?x", "/readyz"}) {
+        const auto request = make_request(http::verb::get, target);
+        EXPECT_EQ(apigate::select_http_upstream(config, request), nullptr);
+        EXPECT_EQ(apigate::handle_http_request(config, request).result(), http::status::ok);
+    }
+}
+
+TEST(HttpHandlerTest, RouteModeMissesStayLocalAndProtocolErrorsStayConsistent) {
+    apigate::AppConfig config;
+    config.routes = {{"/users", {"users", 8001, 100}}};
+    for (const auto method :
+         {http::verb::get, http::verb::post, http::verb::put, http::verb::patch}) {
+        const auto miss = make_request(method, "/users-extra?x");
+        EXPECT_FALSE(apigate::should_proxy_http_request(config, miss));
+        EXPECT_EQ(apigate::handle_http_request(config, miss).result(), http::status::not_found);
+        auto hit = make_request(method, "/users/42");
+        if (method != http::verb::get) {
+            hit.body() = "body";
+        }
+        ASSERT_NE(apigate::select_http_upstream(config, hit), nullptr);
+        EXPECT_EQ(apigate::select_http_upstream(config, hit)->timeout_ms, 100U);
+    }
+    auto invalid_get = make_request(http::verb::get, "/unmatched");
+    invalid_get.body() = "not allowed";
+    auto upgrade = make_request(http::verb::get, "/users");
+    upgrade.set(http::field::upgrade, "websocket");
+    for (const auto& request :
+         {invalid_get, upgrade, make_request(http::verb::get, "http://example.test/users"),
+          make_request(http::verb::get, "/users#fragment")}) {
+        EXPECT_EQ(apigate::select_http_upstream(config, request), nullptr);
+        EXPECT_EQ(apigate::handle_http_request(config, request).result(),
+                  http::status::bad_request);
+    }
+    for (const auto method : {http::verb::head, http::verb::delete_, http::verb::options}) {
+        const auto request = make_request(method, "/users");
+        EXPECT_EQ(apigate::select_http_upstream(config, request), nullptr);
+        EXPECT_EQ(apigate::handle_http_request(config, request).result(),
+                  http::status::method_not_allowed);
+    }
+    const auto legacy = proxy_config();
+    if (legacy.upstream) {
+        EXPECT_EQ(apigate::select_http_upstream(legacy, make_request(http::verb::post, "/any")),
+                  &*legacy.upstream);
+    } else {
+        FAIL() << "legacy fixture requires an upstream";
+    }
 }
 
 }  // namespace

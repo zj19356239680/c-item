@@ -43,6 +43,7 @@ class UpstreamState:
         self.blocked_body_started = threading.Event()
         self.release_blocked_body = threading.Event()
         self.response_marker = "response-marker-not-configured"
+        self.identity = "ok"
         self._request_count = 0
         self._lock = threading.Lock()
 
@@ -174,7 +175,7 @@ class ControlledUpstreamHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Connection", "X-Upstream-Hop, close")
         self.send_header("X-Upstream-Hop", "remove-me")
         self.send_header("Keep-Alive", "timeout=5")
-        body = b'{"upstream":"ok"}'
+        body = json.dumps({"upstream": state.identity}, separators=(",", ":")).encode("ascii")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:

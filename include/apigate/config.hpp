@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace apigate {
 
@@ -24,6 +25,11 @@ struct UpstreamConfig {
     std::uint32_t timeout_ms{3000};
 };
 
+struct RouteConfig {
+    std::string prefix;
+    UpstreamConfig upstream;
+};
+
 struct AppConfig {
     std::string service_name{"api-gate"};
     std::string environment{"development"};
@@ -35,6 +41,7 @@ struct AppConfig {
     std::uint64_t max_in_flight_bytes{67108864};
     std::uint32_t shutdown_grace_ms{5000};
     std::optional<UpstreamConfig> upstream;
+    std::vector<RouteConfig> routes;
 };
 
 class ConfigError : public std::runtime_error {

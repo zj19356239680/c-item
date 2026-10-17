@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 
@@ -29,6 +30,7 @@ class ConfigTest : public testing::Test {
         unsetenv("APIGATE_UPSTREAM_HOST");
         unsetenv("APIGATE_UPSTREAM_PORT");
         unsetenv("APIGATE_UPSTREAM_TIMEOUT_MS");
+        unsetenv("APIGATE_ROUTES");
     }
 };
 
@@ -45,6 +47,137 @@ TEST_F(ConfigTest, UsesSafeDefaults) {
     EXPECT_EQ(config.max_in_flight_bytes, 67108864U);
     EXPECT_EQ(config.shutdown_grace_ms, 5000U);
     EXPECT_FALSE(config.upstream.has_value());
+    EXPECT_TRUE(config.routes.empty());
+}
+
+TEST_F(ConfigTest, ParsesStaticRoutesWithDefaultsAndBoundaries) {
+    const auto input = R"([{"prefix":"/","host":"localhost","port":1},
+        {"prefix":"/users/Admin-._~9","host":"::1","port":65535,"timeout_ms":60000},
+        {"prefix":"/orders","host":"127.0.0.1","port":8080,"timeout_ms":1}])";
+    ASSERT_EQ(setenv("APIGATE_ROUTES", input, 1), 0);
+    const auto config = apigate::load_config_from_environment();
+    ASSERT_EQ(config.routes.size(), 3U);
+    EXPECT_FALSE(config.upstream.has_value());
+    EXPECT_EQ(config.routes[0].prefix, "/");
+    EXPECT_EQ(config.routes[0].upstream.timeout_ms, 3000U);
+    EXPECT_EQ(config.routes[1].upstream.host, "::1");
+    EXPECT_EQ(config.routes[1].upstream.port, 65535);
+    EXPECT_EQ(config.routes[1].upstream.timeout_ms, 60000U);
+    EXPECT_EQ(config.routes[2].upstream.timeout_ms, 1U);
+}
+
+TEST_F(ConfigTest, RejectsRouteShapesFieldsDuplicatesAndTypes) {
+    const char* invalid[] = {
+        "",
+        " ",
+        "[",
+        "[]",
+        "{}",
+        "null",
+        "[true]",
+        "[[]]",
+        "[{}]",
+        R"([{"prefix":"/a","host":"h"}])",
+        R"([{"prefix":"/a","port":80}])",
+        R"([{"host":"h","port":80}])",
+        R"([{"prefix":"/a","host":"h","port":80,"extra":1}])",
+        R"([{"prefix":"/a","prefix":"/b","host":"h","port":80}])",
+        R"([{"prefix":"/a","host":"h","\u0068ost":"other","port":80}])",
+        R"([{"prefix":"/a","host":"h","port":80,"port":81}])",
+        R"([{"prefix":"/a","host":"h","port":80,"timeout_ms":1,"timeout_ms":2}])",
+        R"([{"prefix":"/a","host":"h","port":80},{"prefix":"/a","host":"x","port":81}])",
+        R"([{"prefix":false,"host":"h","port":80}])",
+        R"([{"prefix":"/a","host":1,"port":80}])",
+        R"([{"prefix":"/a","host":"","port":80}])",
+        R"([{"prefix":"/a","host":"host/path","port":80}])",
+        R"([{"prefix":"/a","host":"h","port":{"nested":1}}])",
+        R"([{"prefix":"/a","host":"h","port":null}])",
+    };
+    for (const auto* input : invalid) {
+        ASSERT_EQ(setenv("APIGATE_ROUTES", input, 1), 0);
+        EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()),
+                     apigate::ConfigError);
+    }
+    for (const char* field : {"port", "timeout_ms"}) {
+        for (const auto& invalid_number :
+             nlohmann::json::array({0, -1, 65536, 1.0, 1.5, "80", true, nullptr})) {
+            auto entry = nlohmann::json{{"prefix", "/a"}, {"host", "h"}, {"port", 80}};
+            entry[field] = invalid_number;
+            const auto input = nlohmann::json::array({entry}).dump();
+            ASSERT_EQ(setenv("APIGATE_ROUTES", input.c_str(), 1), 0);
+            EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()),
+                         apigate::ConfigError);
+        }
+    }
+}
+
+TEST_F(ConfigTest, RejectsUnsafeRoutePrefixes) {
+    const char* invalid[] = {"",        "users", "/a/",    "/a//b", "/a/./b",
+                             "/a/../b", "/.",    "/..",    "/a?x",  "/a#x",
+                             "/a b",    "/a\\b", "/a%20b", "/a\n",  "/caf\xc3\xa9"};
+    for (const auto* prefix : invalid) {
+        const auto input =
+            nlohmann::json::array({{{"prefix", prefix}, {"host", "h"}, {"port", 80}}}).dump();
+        ASSERT_EQ(setenv("APIGATE_ROUTES", input.c_str(), 1), 0);
+        EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()),
+                     apigate::ConfigError);
+    }
+}
+
+TEST_F(ConfigTest, EnforcesRouteCountAndRawByteBoundaries) {
+    auto entries = nlohmann::json::array();
+    for (int index = 0; index < 32; ++index) {
+        entries.push_back({{"prefix", "/p" + std::to_string(index)}, {"host", "h"}, {"port", 80}});
+    }
+    auto input = entries.dump();
+    ASSERT_EQ(setenv("APIGATE_ROUTES", input.c_str(), 1), 0);
+    EXPECT_EQ(apigate::load_config_from_environment().routes.size(), 32U);
+    entries.push_back({{"prefix", "/last"}, {"host", "h"}, {"port", 80}});
+    input = entries.dump();
+    ASSERT_EQ(setenv("APIGATE_ROUTES", input.c_str(), 1), 0);
+    EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()), apigate::ConfigError);
+    input = R"([{"prefix":"/","host":"h","port":80}])";
+    input.resize(std::size_t{64} * 1024, ' ');
+    ASSERT_EQ(setenv("APIGATE_ROUTES", input.c_str(), 1), 0);
+    EXPECT_EQ(apigate::load_config_from_environment().routes.size(), 1U);
+    input.push_back(' ');
+    ASSERT_EQ(setenv("APIGATE_ROUTES", input.c_str(), 1), 0);
+    EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()), apigate::ConfigError);
+    ASSERT_EQ(
+        setenv("APIGATE_ROUTES", R"([{"prefix":"/","host":"h","port":18446744073709551616}])", 1),
+        0);
+    EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()), apigate::ConfigError);
+}
+
+TEST_F(ConfigTest, RejectsEveryLegacyConflictEvenEmptyValuesWithoutEchoingRoutes) {
+    const std::string input =
+        R"([{"prefix":"/private-prefix","host":"private-host.test","port":80}])";
+    for (const char* variable :
+         {"APIGATE_UPSTREAM_HOST", "APIGATE_UPSTREAM_PORT", "APIGATE_UPSTREAM_TIMEOUT_MS"}) {
+        clear_environment();
+        ASSERT_EQ(setenv("APIGATE_ROUTES", input.c_str(), 1), 0);
+        ASSERT_EQ(setenv(variable, "", 1), 0);
+        try {
+            static_cast<void>(apigate::load_config_from_environment());
+            FAIL() << "conflicting configuration was accepted";
+        } catch (const apigate::ConfigError& error) {
+            EXPECT_STREQ(error.what(), "APIGATE_ROUTES conflicts with legacy upstream variables");
+        }
+    }
+    clear_environment();
+    for (const auto& invalid :
+         {input.substr(0, input.size() - 1),
+          std::string{R"([{"prefix":"/private-prefix?x","host":"private-host.test","port":80}])"},
+          std::string{
+              R"([{"prefix":"/private-prefix","host":"private-host.test/secret","port":80}])"}}) {
+        ASSERT_EQ(setenv("APIGATE_ROUTES", invalid.c_str(), 1), 0);
+        try {
+            static_cast<void>(apigate::load_config_from_environment());
+            FAIL() << "invalid private configuration was accepted";
+        } catch (const apigate::ConfigError& error) {
+            EXPECT_EQ(std::string{error.what()}.find("private-"), std::string::npos);
+        }
+    }
 }
 
 TEST_F(ConfigTest, AcceptsInFlightByteBudgetBoundariesAndIntermediateValue) {

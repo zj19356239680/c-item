@@ -1,8 +1,8 @@
 # ApiGate
 
 ApiGate 是一个用于学习和逐步开发 API 网关的 C++20 项目。当前版本提供异步
-HTTP/1.1 健康检查、配置校验、JSON 日志，以及可选的单一静态 HTTP 上游代理。
-代理支持 GET 及有界正文的 POST、PUT、PATCH。它没有多上游、流式上传、重试、连接池、
+HTTP/1.1 健康检查、配置校验、JSON 日志，以及可选的路径路由与多个静态 HTTP 上游。
+代理支持 GET 及有界正文的 POST、PUT、PATCH。它没有负载均衡、流式上传、重试、连接池、
 缓存、限流、认证、TLS 或 HTTP/2；不要把它当作生产网关。本项目在 Linux 环境下开发，
 仅支持 Linux 构建与运行。
 
@@ -213,6 +213,7 @@ bash scripts/check.sh
 | `APIGATE_UPSTREAM_HOST` | 未设置 | 纯 DNS 主机名、IPv4 或 IPv6 字面地址；必须与端口同时设置 |
 | `APIGATE_UPSTREAM_PORT` | 未设置 | 1–65535；必须与主机同时设置 |
 | `APIGATE_UPSTREAM_TIMEOUT_MS` | `3000`（代理启用时） | 1–60000；仅可与完整上游配置一起使用 |
+| `APIGATE_ROUTES` | 未设置 | 非空 JSON 数组，最多 32 条、原始值最多 64 KiB；与任一旧上游变量互斥 |
 
 例如，换一个本机端口运行：
 
@@ -228,13 +229,36 @@ APIGATE_UPSTREAM_PORT=9001 \
 bash scripts/run.sh
 ```
 
-三项上游变量均未设置时代理关闭，原有未知 GET 的 404 及其他方法的 405 行为保持不变。
+按路径转发到不同后端（先取消当前 shell 中的旧上游变量）：
+
+```bash
+unset APIGATE_UPSTREAM_HOST APIGATE_UPSTREAM_PORT APIGATE_UPSTREAM_TIMEOUT_MS
+APIGATE_ROUTES='[{"prefix":"/users","host":"127.0.0.1","port":9001},{"prefix":"/orders","host":"127.0.0.1","port":9002,"timeout_ms":2000}]' \
+bash scripts/run.sh
+```
+
+每项必填 `prefix`、`host`、整数 `port`（1–65535）；可选整数 `timeout_ms`
+（1–60000 毫秒，默认 3000）。host 使用上述 DNS/IP 规则。拒绝未知、重复或缺失字段、
+重复 prefix、空值和非法类型；错误不会回显路由配置。所有配置在监听前校验，只在启动时读取。
+prefix 必须以 `/` 开始；除 `/` 外不得以 `/` 结束。路径段只能含 ASCII 字母、数字及
+`-._~`，不允许空段、`.`、`..`，也不能包含 query、fragment、空格、控制字符、反斜杠或 `%`。
+
+按原始目标 `?` 前的路径、区分大小写并在路径段边界选择最长前缀，与配置顺序无关。
+`/users` 匹配 `/users` 和 `/users/42`，不匹配 `/users-extra`；`/` 可兜底。
+不解码、规范化、剥离前缀或重写路径，转发保留原始路径和 query；后端对路径的解释
+可能不同。本地 `/healthz`、`/readyz` 优先于任何路由。合法且支持的方法未命中时返回
+本地 404，不回退到其他上游。同一 keep-alive 连接的每个请求重新选路，Host 按所选
+上游重建，使用该路由的超时。连接、代理并发和正文预算仍由所有路由全局共享。
+多个静态上游不等于负载均衡、故障转移、服务发现或动态更新。
+
+新旧上游变量均未设置时代理关闭，原有未知 GET 的 404 及其他方法的 405 行为保持不变。
 三项容量配置始终校验；代理关闭时代理并发上限不被使用。配置检查结果会报告
 `max_connections`、`max_concurrent_proxies`、`max_in_flight_bytes`、
-`shutdown_grace_ms`、`proxy_enabled` 和启用时的 `upstream_timeout_ms`，不会输出上游主机名。
+`shutdown_grace_ms`、`proxy_enabled`；旧单上游模式包含 `upstream_timeout_ms`，
+路由模式只包含安全的 `route_count`，不会输出路由表、host 或 prefix，也不虚构统一超时。
 
 当前没有每客户端/IP 限制或请求速率限制；也不支持其他代理方法、
-流式上传、连接池、多上游、上游 TLS、HTTP/2、WebSocket 或预排空管理阶段。实际可承载数量
+流式上传、连接池、动态路由、上游 TLS、HTTP/2、WebSocket 或预排空管理阶段。实际可承载数量
 仍受文件描述符、内存、CPU、请求/响应缓冲和操作系统 backlog 等因素约束。现有测试
 覆盖不构成生产容量或协议兼容性承诺。
 

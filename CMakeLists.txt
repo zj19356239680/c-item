@@ -116,6 +116,10 @@ if(BUILD_TESTING)
     add_test(NAME integration.http_proxy
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/http_proxy_test.py
                 $<TARGET_FILE:api-gate>)
+    add_test(NAME integration.http_routes
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/http_routes_test.py
+                $<TARGET_FILE:api-gate>)
+    set_tests_properties(integration.http_routes PROPERTIES TIMEOUT 20)
     add_test(NAME integration.capacity_baseline_smoke
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/capacity-baseline.py
                 $<TARGET_FILE:api-gate> --smoke)

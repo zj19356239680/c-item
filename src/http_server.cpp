@@ -454,9 +454,9 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         }
         ++requests_served_;
         const auto& request = parser_->get();
-        if (should_proxy_http_request(config_, request)) {
+        if (const auto* upstream = select_http_upstream(config_, request)) {
             phase_ = detail::SessionPhase::proxying;
-            start_proxy_request(request);
+            start_proxy_request(request, *upstream);
             return;
         }
         auto response = handle_http_request(config_, request);
@@ -523,13 +523,10 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         write_response(std::move(response));
     }
 
-    void start_proxy_request(const HttpRequest& request) noexcept {
+    void start_proxy_request(const HttpRequest& request, const UpstreamConfig& upstream) noexcept {
         std::shared_ptr<HttpProxyExchange> exchange;
         const auto method = request.method();
         try {
-            if (!config_.upstream.has_value()) {
-                throw std::logic_error{"proxy request requires upstream configuration"};
-            }
             proxy_permit_ = detail::ProxyPermit::try_acquire(proxy_admission_);
             if (!proxy_permit_) {
                 auto response =
@@ -543,8 +540,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
                 return;
             }
             exchange = std::make_shared<HttpProxyExchange>(
-                stream_.get_executor(), config_.upstream.value(), request, buffer_budget_,
-                request_body_permit_,
+                stream_.get_executor(), upstream, request, buffer_budget_, request_body_permit_,
                 [weak_self = weak_from_this(), method](ProxyResult result) noexcept {
                     if (const auto self = weak_self.lock()) {
                         self->on_proxy_complete(method, std::move(result));

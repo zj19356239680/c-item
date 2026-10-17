@@ -58,6 +58,10 @@ void print_help() {
         << "  APIGATE_UPSTREAM_HOST Optional static HTTP upstream host\n"
         << "  APIGATE_UPSTREAM_PORT Optional static HTTP upstream port (1-65535)\n"
         << "  APIGATE_UPSTREAM_TIMEOUT_MS Per-stage timeout in milliseconds (default: 3000)\n";
+    std::cout
+        << "  APIGATE_ROUTES        Optional JSON array of 1-32 static path routes (max 64 KiB);\n"
+        << "                       prefix/host/port required, timeout_ms defaults to 3000;\n"
+        << "                       mutually exclusive with APIGATE_UPSTREAM_*\n";
 }
 
 void print_version() { std::cout << "api-gate " << apigate::version << '\n'; }
@@ -94,14 +98,18 @@ int main(int argc, char* argv[]) {
         const apigate::AppConfig config = apigate::load_config_from_environment();
         apigate::StructuredLogger logger{config};
         if (command == Command::check_config) {
-            nlohmann::json fields{{"log_level", apigate::to_string(config.log_level)},
-                                  {"listen_address", config.listen_address},
-                                  {"listen_port", config.listen_port},
-                                  {"max_connections", config.max_connections},
-                                  {"max_concurrent_proxies", config.max_concurrent_proxies},
-                                  {"max_in_flight_bytes", config.max_in_flight_bytes},
-                                  {"shutdown_grace_ms", config.shutdown_grace_ms},
-                                  {"proxy_enabled", config.upstream.has_value()}};
+            nlohmann::json fields{
+                {"log_level", apigate::to_string(config.log_level)},
+                {"listen_address", config.listen_address},
+                {"listen_port", config.listen_port},
+                {"max_connections", config.max_connections},
+                {"max_concurrent_proxies", config.max_concurrent_proxies},
+                {"max_in_flight_bytes", config.max_in_flight_bytes},
+                {"shutdown_grace_ms", config.shutdown_grace_ms},
+                {"proxy_enabled", config.upstream.has_value() || !config.routes.empty()}};
+            if (!config.routes.empty()) {
+                fields["route_count"] = config.routes.size();
+            }
             if (config.upstream) {
                 fields["upstream_timeout_ms"] = config.upstream->timeout_ms;
             }

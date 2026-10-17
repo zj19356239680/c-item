@@ -33,6 +33,7 @@ APIGATE_ENVIRONMENT_VARIABLES = (
     "APIGATE_UPSTREAM_HOST",
     "APIGATE_UPSTREAM_PORT",
     "APIGATE_UPSTREAM_TIMEOUT_MS",
+    "APIGATE_ROUTES",
 )
 
 
@@ -400,6 +401,7 @@ def test_command_line(binary, expected_version):
     assert "APIGATE_UPSTREAM_HOST" in help_result.stdout
     assert "APIGATE_UPSTREAM_PORT" in help_result.stdout
     assert "APIGATE_UPSTREAM_TIMEOUT_MS" in help_result.stdout
+    assert "APIGATE_ROUTES" in help_result.stdout
     assert "APIGATE_MAX_CONNECTIONS" in help_result.stdout
     assert "APIGATE_MAX_CONCURRENT_PROXIES" in help_result.stdout
     assert "APIGATE_MAX_IN_FLIGHT_BYTES" in help_result.stdout
