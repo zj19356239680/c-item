@@ -20,7 +20,7 @@ namespace asio = boost::asio;
 namespace http = boost::beast::http;
 using tcp = asio::ip::tcp;
 using namespace std::chrono_literals;
-constexpr std::size_t response_bytes = 1024 * 1024;
+constexpr std::size_t response_bytes = std::size_t{1024} * 1024;
 
 struct Client {
     explicit Client(asio::io_context& context) : socket(context) {
