@@ -142,6 +142,32 @@ bash scripts/run.sh --version
 `project(VERSION ...)`。该命令不读取 `APIGATE_*` 配置、不创建日志器或监听 socket，
 也不输出服务运行日志。版本输出不包含 Git SHA、构建时间或构建主机信息。
 
+### 容量与慢客户端基线
+
+构建 Debug 可执行文件后，可用仅依赖 Python 标准库的本地工具重复观察慢速正文占用、
+预算拒绝、额度回收和 ApiGate RSS 采样：
+
+```bash
+python3 scripts/capacity-baseline.py build/linux-debug/bin/api-gate
+python3 scripts/capacity-baseline.py build/linux-debug/bin/api-gate --smoke
+```
+
+普通模式默认运行 3 轮，每轮各启动 8 个竞争请求，已知长度预约为 32768 字节，单次
+等待超时为 10 秒；`--smoke` 对未显式指定的参数改用 1 轮、2 个竞争请求、4096 字节和
+5 秒。可用 `--rounds`、`--contenders`、`--reservation-bytes`（1–65536）及
+`--timeout-seconds` 调整。工具为 ApiGate 和受控 HTTP 上游选择动态端口，自行清理进程、
+线程与 socket；完整基线保持手动执行，CTest 只运行很小的 smoke 回归。
+每次运行会为子进程单独设置正文预算，使其等于 `--reservation-bytes`，并把连接和代理
+数量上限设为大于竞争请求数，以隔离正文预算拒绝；不会修改程序默认的 64 MiB 配置。
+预约为 1 字节时，慢上传在 header 后暂停，暂不发送正文，避免提前完成唯一的正文字节。
+
+成功时标准输出只有一份 JSON，包含 schema 版本、实际参数、两个场景的请求/成功/正文
+预算 503/其他错误计数、耗时、日志核验，以及从 `/proc/<pid>/status` 周期采样的
+`baseline_kib`、`approx_peak_kib` 和 `delta_kib`。诊断写入标准错误。RSS 是近似采样，
+不是 allocator 精确统计或跨机器稳定阈值；工具也不设置延迟、吞吐或 RSS 合格线。
+该结果只是测量基线，不是生产容量或性能承诺，应在目标机器和代表性流量下重新运行。
+输出结果文件及诊断日志属于本地产物，不应提交仓库。
+
 ### VS Code Dev Container
 
 仓库的 `.devcontainer/` 提供独立的单容器 Linux 开发环境，不复用宿主 vcpkg，也不

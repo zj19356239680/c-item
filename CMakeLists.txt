@@ -98,6 +98,9 @@ if(BUILD_TESTING)
     add_test(NAME integration.http_proxy
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/http_proxy_test.py
                 $<TARGET_FILE:api-gate>)
+    add_test(NAME integration.capacity_baseline_smoke
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/capacity-baseline.py
+                $<TARGET_FILE:api-gate> --smoke)
     set_tests_properties(
         integration.config_check
         integration.service_lifecycle
@@ -106,8 +109,10 @@ if(BUILD_TESTING)
         integration.container_smoke_safety
         integration.http_server
         integration.http_proxy
+        integration.capacity_baseline_smoke
         PROPERTIES TIMEOUT 15)
     set_tests_properties(integration.http_server PROPERTIES TIMEOUT 40)
     set_tests_properties(integration.http_proxy PROPERTIES TIMEOUT 30)
+    set_tests_properties(integration.capacity_baseline_smoke PROPERTIES TIMEOUT 30)
     set_tests_properties(integration.install_deps_safety PROPERTIES SKIP_RETURN_CODE 77)
 endif()
