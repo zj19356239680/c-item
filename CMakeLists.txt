@@ -105,6 +105,10 @@ if(BUILD_TESTING)
     add_test(NAME integration.http_server
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/http_server_test.py
                 $<TARGET_FILE:api-gate> ${PROJECT_VERSION})
+    add_test(NAME integration.header_timeout
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/header_timeout_test.py
+                $<TARGET_FILE:api-gate>)
+    set_tests_properties(integration.header_timeout PROPERTIES TIMEOUT 45)
     add_test(NAME integration.http_proxy
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/http_proxy_test.py
                 $<TARGET_FILE:api-gate>)
