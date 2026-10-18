@@ -28,6 +28,7 @@ struct UpstreamConfig {
 struct RouteConfig {
     std::string prefix;
     UpstreamConfig upstream;
+    bool strip_prefix{false};
 };
 
 struct AppConfig {

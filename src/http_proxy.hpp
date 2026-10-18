@@ -86,7 +86,7 @@ void run_proxy_completion_action(ProxyCompletionState& state, CompletionAction&&
 }
 
 [[nodiscard]] std::string make_upstream_authority(std::string_view host, std::uint16_t port);
-[[nodiscard]] HttpRequest make_upstream_request(const UpstreamConfig& config,
+[[nodiscard]] HttpRequest make_upstream_request(const SelectedUpstream& selected,
                                                 const HttpRequest& request);
 [[nodiscard]] HttpResponse make_downstream_response(const HttpRequest& request,
                                                     HttpResponse upstream_response);
@@ -98,8 +98,8 @@ class HttpProxyExchange : public std::enable_shared_from_this<HttpProxyExchange>
     using CompletionCallback = std::function<void(ProxyResult)>;
     using AbortCallback = std::function<void()>;
 
-    HttpProxyExchange(const boost::asio::any_io_executor& executor, const UpstreamConfig& config,
-                      const HttpRequest& request,
+    HttpProxyExchange(const boost::asio::any_io_executor& executor,
+                      const SelectedUpstream& selected, const HttpRequest& request,
                       std::shared_ptr<detail::BufferBudgetState> buffer_budget,
                       std::shared_ptr<detail::BufferBudgetPermit> request_body_permit,
                       CompletionCallback on_complete, AbortCallback on_abort);

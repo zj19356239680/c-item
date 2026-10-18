@@ -59,11 +59,41 @@ TEST_F(ConfigTest, ParsesStaticRoutesWithDefaultsAndBoundaries) {
     ASSERT_EQ(config.routes.size(), 3U);
     EXPECT_FALSE(config.upstream.has_value());
     EXPECT_EQ(config.routes[0].prefix, "/");
+    EXPECT_FALSE(config.routes[0].strip_prefix);
     EXPECT_EQ(config.routes[0].upstream.timeout_ms, 3000U);
     EXPECT_EQ(config.routes[1].upstream.host, "::1");
     EXPECT_EQ(config.routes[1].upstream.port, 65535);
     EXPECT_EQ(config.routes[1].upstream.timeout_ms, 60000U);
     EXPECT_EQ(config.routes[2].upstream.timeout_ms, 1U);
+}
+
+TEST_F(ConfigTest, AcceptsOnlyBooleanStripPrefixAndRejectsDuplicates) {
+    for (const bool strip : {false, true}) {
+        const auto input =
+            nlohmann::json::array(
+                {{{"prefix", "/users"}, {"host", "h"}, {"port", 80}, {"strip_prefix", strip}}})
+                .dump();
+        ASSERT_EQ(setenv("APIGATE_ROUTES", input.c_str(), 1), 0);
+        const auto config = apigate::load_config_from_environment();
+        ASSERT_EQ(config.routes.size(), 1U);
+        EXPECT_EQ(config.routes.front().strip_prefix, strip);
+    }
+    for (const auto& value : nlohmann::json::array({0, 1, -1, 1.0, "true", "false", nullptr})) {
+        const auto input =
+            nlohmann::json::array(
+                {{{"prefix", "/users"}, {"host", "h"}, {"port", 80}, {"strip_prefix", value}}})
+                .dump();
+        ASSERT_EQ(setenv("APIGATE_ROUTES", input.c_str(), 1), 0);
+        EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()),
+                     apigate::ConfigError);
+    }
+    ASSERT_EQ(
+        setenv(
+            "APIGATE_ROUTES",
+            R"([{"prefix":"/users","host":"h","port":80,"strip_prefix":true,"strip_prefix":false}])",
+            1),
+        0);
+    EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()), apigate::ConfigError);
 }
 
 TEST_F(ConfigTest, RejectsRouteShapesFieldsDuplicatesAndTypes) {

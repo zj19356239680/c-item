@@ -35,7 +35,7 @@ TEST(HttpProxyTest, BuildsAuthoritiesForDnsIpv4AndIpv6) {
 TEST(HttpProxyTest, FiltersRequestHopByHopHeadersAndPreservesEndToEndHeaders) {
     const apigate::UpstreamConfig config{"::1", 8080, 3000};
 
-    const auto upstream = apigate::detail::make_upstream_request(config, make_request());
+    const auto upstream = apigate::detail::make_upstream_request({config, {}}, make_request());
 
     EXPECT_EQ(upstream.target(), "/resource?key=value");
     EXPECT_EQ(upstream[http::field::host], "[::1]:8080");
@@ -58,7 +58,7 @@ TEST(HttpProxyTest, PreservesBodyMethodAndPayloadWithRegeneratedLength) {
         request.set(http::field::transfer_encoding, "chunked");
         request.body() = "forwarded-payload";
 
-        const auto upstream = apigate::detail::make_upstream_request(config, request);
+        const auto upstream = apigate::detail::make_upstream_request({config, {}}, request);
 
         EXPECT_EQ(upstream.method(), method);
         EXPECT_EQ(upstream.target(), request.target());
@@ -75,11 +75,67 @@ TEST(HttpProxyTest, RegeneratesZeroLengthForEmptyBodyMethods) {
         auto request = make_request();
         request.method(method);
 
-        const auto upstream = apigate::detail::make_upstream_request(config, request);
+        const auto upstream = apigate::detail::make_upstream_request({config, {}}, request);
 
         EXPECT_EQ(upstream.method(), method);
         EXPECT_TRUE(upstream.body().empty());
         EXPECT_EQ(upstream[http::field::content_length], "0");
+    }
+}
+
+TEST(HttpProxyTest, BuildsTargetsFromTheSelectedRouteWithoutChangingTheDownstreamRequest) {
+    apigate::AppConfig config;
+    config.routes = {{"/users", {"users", 8001, 100}, true},
+                     {"/users/admin", {"admins", 8002, 200}, false},
+                     {"/orders", {"orders", 8003, 300}},
+                     {"/", {"fallback", 8004, 400}, true}};
+    struct TargetCase {
+        const char* downstream;
+        const char* upstream;
+        const char* host;
+    };
+    const TargetCase cases[] = {
+        {"/users/42", "/42", "users:8001"},
+        {"/users", "/", "users:8001"},
+        {"/users/", "/", "users:8001"},
+        {"/users?x=1", "/?x=1", "users:8001"},
+        {"/users?", "/?", "users:8001"},
+        {"/users/42?x=%2F&x=2&x=%2f&empty=", "/42?x=%2F&x=2&x=%2f&empty=", "users:8001"},
+        {"/users//42", "//42", "users:8001"},
+        {"/users/../%2f./42?", "/../%2f./42?", "users:8001"},
+        {"/users/healthz", "/healthz", "users:8001"},
+        {"/users/readyz?", "/readyz?", "users:8001"},
+        {"/users/admin/42?x=%2F", "/users/admin/42?x=%2F", "admins:8002"},
+        {"/orders/42?", "/orders/42?", "orders:8003"},
+        {"/users-extra?x=1", "/users-extra?x=1", "fallback:8004"},
+        {"/other//%2f?x=&x=%2F", "/other//%2f?x=&x=%2F", "fallback:8004"},
+        {"/?", "/?", "fallback:8004"},
+    };
+    for (const auto& entry : cases) {
+        for (const auto method : {http::verb::get, http::verb::post}) {
+            auto request = make_request();
+            request.method(method);
+            request.target(entry.downstream);
+            if (method == http::verb::post) {
+                request.body() = "unchanged-request-body";
+            }
+            const auto selected = apigate::select_http_upstream(config, request);
+            if (!selected) {
+                FAIL() << "expected a matching route";
+                continue;
+            }
+            const auto upstream = apigate::detail::make_upstream_request(*selected, request);
+            EXPECT_EQ(upstream.target(), entry.upstream);
+            EXPECT_EQ(upstream[http::field::host], entry.host);
+            EXPECT_EQ(upstream.method(), method);
+            EXPECT_EQ(upstream.body(), request.body());
+            EXPECT_EQ(request.target(), entry.downstream);
+            if (method == http::verb::post) {
+                EXPECT_EQ(upstream[http::field::content_length],
+                          std::to_string(request.body().size()));
+                EXPECT_EQ(request.body(), "unchanged-request-body");
+            }
+        }
     }
 }
 

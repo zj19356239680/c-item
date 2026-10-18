@@ -3,6 +3,7 @@
 
 #include <boost/beast/http.hpp>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 #include "apigate/config.hpp"
@@ -23,9 +24,15 @@ enum class GatewayFailure : std::uint8_t {
 [[nodiscard]] std::string_view classify_http_route(std::string_view target) noexcept;
 [[nodiscard]] bool should_proxy_http_request(const AppConfig& config,
                                              const HttpRequest& request) noexcept;
-// The result borrows immutable AppConfig storage. HttpProxyExchange copies it.
-[[nodiscard]] const UpstreamConfig* select_http_upstream(const AppConfig& config,
-                                                         const HttpRequest& request) noexcept;
+// Borrows immutable AppConfig storage; consumed synchronously by proxy construction.
+struct SelectedUpstream {
+    const UpstreamConfig& upstream;
+    std::string_view prefix;
+    bool strip_prefix{false};
+};
+
+[[nodiscard]] std::optional<SelectedUpstream> select_http_upstream(
+    const AppConfig& config, const HttpRequest& request) noexcept;
 [[nodiscard]] HttpResponse make_gateway_error_response(const HttpRequest& request,
                                                        GatewayFailure failure);
 

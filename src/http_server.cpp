@@ -454,7 +454,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         }
         ++requests_served_;
         const auto& request = parser_->get();
-        if (const auto* upstream = select_http_upstream(config_, request)) {
+        if (const auto upstream = select_http_upstream(config_, request)) {
             phase_ = detail::SessionPhase::proxying;
             start_proxy_request(request, *upstream);
             return;
@@ -523,7 +523,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         write_response(std::move(response));
     }
 
-    void start_proxy_request(const HttpRequest& request, const UpstreamConfig& upstream) noexcept {
+    void start_proxy_request(const HttpRequest& request,
+                             const SelectedUpstream& upstream) noexcept {
         std::shared_ptr<HttpProxyExchange> exchange;
         const auto method = request.method();
         try {

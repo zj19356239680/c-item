@@ -233,20 +233,29 @@ bash scripts/run.sh
 
 ```bash
 unset APIGATE_UPSTREAM_HOST APIGATE_UPSTREAM_PORT APIGATE_UPSTREAM_TIMEOUT_MS
-APIGATE_ROUTES='[{"prefix":"/users","host":"127.0.0.1","port":9001},{"prefix":"/orders","host":"127.0.0.1","port":9002,"timeout_ms":2000}]' \
+APIGATE_ROUTES='[{"prefix":"/users","host":"127.0.0.1","port":9001,"strip_prefix":true},{"prefix":"/orders","host":"127.0.0.1","port":9002,"timeout_ms":2000}]' \
 bash scripts/run.sh
 ```
 
 每项必填 `prefix`、`host`、整数 `port`（1–65535）；可选整数 `timeout_ms`
-（1–60000 毫秒，默认 3000）。host 使用上述 DNS/IP 规则。拒绝未知、重复或缺失字段、
+（1–60000 毫秒，默认 3000）和 boolean `strip_prefix`（默认 false）。
+`strip_prefix` 只接受 JSON true/false，不接受数字、字符串或 null。
+host 使用上述 DNS/IP 规则。拒绝未知、重复或缺失字段、
 重复 prefix、空值和非法类型；错误不会回显路由配置。所有配置在监听前校验，只在启动时读取。
 prefix 必须以 `/` 开始；除 `/` 外不得以 `/` 结束。路径段只能含 ASCII 字母、数字及
 `-._~`，不允许空段、`.`、`..`，也不能包含 query、fragment、空格、控制字符、反斜杠或 `%`。
 
 按原始目标 `?` 前的路径、区分大小写并在路径段边界选择最长前缀，与配置顺序无关。
 `/users` 匹配 `/users` 和 `/users/42`，不匹配 `/users-extra`；`/` 可兜底。
-不解码、规范化、剥离前缀或重写路径，转发保留原始路径和 query；后端对路径的解释
-可能不同。本地 `/healthz`、`/readyz` 优先于任何路由。合法且支持的方法未命中时返回
+默认保留原始路径。启用 `strip_prefix` 让后端无需感知外部前缀：先选路，再仅从 path
+原始字节中移除匹配前缀，不重新选路。例如 `/users/42` → `/42`，`/users`、`/users/`
+→ `/`，`/users?x=1` → `/?x=1`。根路由 `/` 即使启用也保持原样；旧单上游模式不剥离。
+query 逐字节保留，包括重复参数、百分号大小写、空值和单独尾随 `?`。
+这只是可选匹配前缀剥离，不是路径规范化或安全过滤：不解码、不折叠重复斜杠，
+不解释 `.`、`..`；例如 `/users//42` → `//42`。不支持任意 rewrite 模板或 query、
+Location、Cookie Path 重写；后端对路径的解释可能不同。
+本地 `/healthz`、`/readyz` 优先于任何路由；剥离后变为这两个路径的请求仍发往已选上游。
+合法且支持的方法未命中时返回
 本地 404，不回退到其他上游。同一 keep-alive 连接的每个请求重新选路，Host 按所选
 上游重建，使用该路由的超时。连接、代理并发和正文预算仍由所有路由全局共享。
 多个静态上游不等于负载均衡、故障转移、服务发现或动态更新。

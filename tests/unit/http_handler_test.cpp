@@ -220,15 +220,18 @@ TEST(HttpHandlerTest, SelectsLongestRawPathOnSegmentBoundariesRegardlessOfOrder)
     for (int order = 0; order < 2; ++order) {
         for (const auto& [target, host] : cases) {
             const auto request = make_request(http::verb::get, target);
-            const auto* selected = apigate::select_http_upstream(config, request);
-            ASSERT_NE(selected, nullptr);
-            EXPECT_EQ(selected->host, host);
+            const auto selected = apigate::select_http_upstream(config, request);
+            if (selected) {
+                EXPECT_EQ(selected->upstream.host, host);
+            } else {
+                FAIL() << "expected a matching route";
+            }
         }
         std::ranges::reverse(config.routes);
     }
     for (const char* target : {"/healthz?x", "/readyz"}) {
         const auto request = make_request(http::verb::get, target);
-        EXPECT_EQ(apigate::select_http_upstream(config, request), nullptr);
+        EXPECT_FALSE(apigate::select_http_upstream(config, request).has_value());
         EXPECT_EQ(apigate::handle_http_request(config, request).result(), http::status::ok);
     }
 }
@@ -245,8 +248,12 @@ TEST(HttpHandlerTest, RouteModeMissesStayLocalAndProtocolErrorsStayConsistent) {
         if (method != http::verb::get) {
             hit.body() = "body";
         }
-        ASSERT_NE(apigate::select_http_upstream(config, hit), nullptr);
-        EXPECT_EQ(apigate::select_http_upstream(config, hit)->timeout_ms, 100U);
+        const auto selected = apigate::select_http_upstream(config, hit);
+        if (selected) {
+            EXPECT_EQ(selected->upstream.timeout_ms, 100U);
+        } else {
+            FAIL() << "expected a matching route";
+        }
     }
     auto invalid_get = make_request(http::verb::get, "/unmatched");
     invalid_get.body() = "not allowed";
@@ -255,20 +262,23 @@ TEST(HttpHandlerTest, RouteModeMissesStayLocalAndProtocolErrorsStayConsistent) {
     for (const auto& request :
          {invalid_get, upgrade, make_request(http::verb::get, "http://example.test/users"),
           make_request(http::verb::get, "/users#fragment")}) {
-        EXPECT_EQ(apigate::select_http_upstream(config, request), nullptr);
+        EXPECT_FALSE(apigate::select_http_upstream(config, request).has_value());
         EXPECT_EQ(apigate::handle_http_request(config, request).result(),
                   http::status::bad_request);
     }
     for (const auto method : {http::verb::head, http::verb::delete_, http::verb::options}) {
         const auto request = make_request(method, "/users");
-        EXPECT_EQ(apigate::select_http_upstream(config, request), nullptr);
+        EXPECT_FALSE(apigate::select_http_upstream(config, request).has_value());
         EXPECT_EQ(apigate::handle_http_request(config, request).result(),
                   http::status::method_not_allowed);
     }
     const auto legacy = proxy_config();
-    if (legacy.upstream) {
-        EXPECT_EQ(apigate::select_http_upstream(legacy, make_request(http::verb::post, "/any")),
-                  &*legacy.upstream);
+    const auto selected =
+        apigate::select_http_upstream(legacy, make_request(http::verb::post, "/any"));
+    if (legacy.upstream && selected) {
+        EXPECT_EQ(&selected->upstream, &*legacy.upstream);
+        EXPECT_TRUE(selected->prefix.empty());
+        EXPECT_FALSE(selected->strip_prefix);
     } else {
         FAIL() << "legacy fixture requires an upstream";
     }

@@ -133,8 +133,20 @@ std::string make_upstream_authority(std::string_view host, std::uint16_t port) {
     return std::string{host} + ':' + port_text;
 }
 
-HttpRequest make_upstream_request(const UpstreamConfig& config, const HttpRequest& request) {
-    HttpRequest upstream{request.method(), request.target(), 11};
+HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRequest& request) {
+    const auto& config = selected.upstream;
+    std::string_view target{request.target().data(), request.target().size()};
+    std::string rewritten_target;
+    if (selected.strip_prefix && !selected.prefix.empty() && selected.prefix != "/") {
+        // Selection already established the raw path boundary. Do not decode or select again.
+        target.remove_prefix(selected.prefix.size());
+        if (target.empty() || target.front() == '?') {
+            rewritten_target = '/';
+            rewritten_target.append(target);
+            target = rewritten_target;
+        }
+    }
+    HttpRequest upstream{request.method(), target, 11};
     const auto dynamic_tokens = connection_tokens(request.base());
     for (const auto& field : request.base()) {
         const std::string_view name{field.name_string().data(), field.name_string().size()};
@@ -179,16 +191,16 @@ HttpResponse make_downstream_response(const HttpRequest& request, HttpResponse u
 
 class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExchange::Impl> {
    public:
-    Impl(const asio::any_io_executor& executor, const UpstreamConfig& config,
+    Impl(const asio::any_io_executor& executor, const SelectedUpstream& selected,
          const HttpRequest& request, std::shared_ptr<detail::BufferBudgetState> buffer_budget,
          std::shared_ptr<detail::BufferBudgetPermit> request_body_permit,
          CompletionCallback on_complete, AbortCallback on_abort)
         : resolver_(executor),
           stream_(executor),
           deadline_(executor),
-          config_(config),
+          config_(selected.upstream),
           downstream_request_(request),
-          upstream_request_(detail::make_upstream_request(config, request)),
+          upstream_request_(detail::make_upstream_request(selected, request)),
           buffer_budget_(std::move(buffer_budget)),
           request_body_permit_(std::move(request_body_permit)),
           on_complete_(std::move(on_complete)),
@@ -514,14 +526,14 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
 };
 
 HttpProxyExchange::HttpProxyExchange(
-    const asio::any_io_executor& executor, const UpstreamConfig& config, const HttpRequest& request,
-    std::shared_ptr<detail::BufferBudgetState> buffer_budget,
+    const asio::any_io_executor& executor, const SelectedUpstream& selected,
+    const HttpRequest& request, std::shared_ptr<detail::BufferBudgetState> buffer_budget,
     std::shared_ptr<detail::BufferBudgetPermit> request_body_permit, CompletionCallback on_complete,
     AbortCallback on_abort)
     // Boost.Asio's resolver service calls its final shutdown hook during service destruction;
     // the analyzer reports this library-owned, non-polymorphic cleanup as virtual dispatch.
     // NOLINTNEXTLINE(clang-analyzer-optin.cplusplus.VirtualCall)
-    : impl_(std::make_shared<Impl>(executor, config, request, std::move(buffer_budget),
+    : impl_(std::make_shared<Impl>(executor, selected, request, std::move(buffer_budget),
                                    std::move(request_body_permit), std::move(on_complete),
                                    std::move(on_abort))) {}
 

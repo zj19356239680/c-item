@@ -65,33 +65,33 @@ std::string_view classify_http_route(std::string_view target) noexcept {
 }
 
 bool should_proxy_http_request(const AppConfig& config, const HttpRequest& request) noexcept {
-    return select_http_upstream(config, request) != nullptr;
+    return select_http_upstream(config, request).has_value();
 }
 
-const UpstreamConfig* select_http_upstream(const AppConfig& config,
-                                           const HttpRequest& request) noexcept {
+std::optional<SelectedUpstream> select_http_upstream(const AppConfig& config,
+                                                     const HttpRequest& request) noexcept {
     if (!is_supported_proxy_method(request.method())) {
-        return nullptr;
+        return std::nullopt;
     }
     const std::string_view target{request.target().data(), request.target().size()};
     if (classify_http_route(target) != "unmatched") {
-        return nullptr;
+        return std::nullopt;
     }
     if (!is_supported_proxy_target(target) || requests_upgrade(request) ||
         (request.method() == http::verb::get && !request.body().empty())) {
-        return nullptr;
+        return std::nullopt;
     }
     if (config.upstream) {
-        return &*config.upstream;
+        return SelectedUpstream{*config.upstream, {}, false};
     }
     const auto path = request_path(target);
-    const UpstreamConfig* selected = nullptr;
+    std::optional<SelectedUpstream> selected;
     std::size_t longest = 0;
     for (const auto& route : config.routes) {
         const auto& prefix = route.prefix;
         if (prefix.size() > longest && path.starts_with(prefix) &&
             (prefix == "/" || path.size() == prefix.size() || path[prefix.size()] == '/')) {
-            selected = &route.upstream;
+            selected.emplace(SelectedUpstream{route.upstream, route.prefix, route.strip_prefix});
             longest = prefix.size();
         }
     }

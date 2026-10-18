@@ -255,7 +255,7 @@ void validate_route_prefix(std::string_view prefix) {
         }
         for (const auto& item : entry.items()) {
             if (item.key() != "prefix" && item.key() != "host" && item.key() != "port" &&
-                item.key() != "timeout_ms") {
+                item.key() != "timeout_ms" && item.key() != "strip_prefix") {
                 throw ConfigError("APIGATE_ROUTES entry contains an unknown field");
             }
         }
@@ -282,7 +282,12 @@ void validate_route_prefix(std::string_view prefix) {
             entry.contains("timeout_ms")
                 ? static_cast<std::uint32_t>(route_integer(entry.at("timeout_ms"), 60000))
                 : 3000U;
-        routes.push_back({std::move(prefix), {std::move(validated_host), port, timeout}});
+        if (entry.contains("strip_prefix") && !entry.at("strip_prefix").is_boolean()) {
+            throw ConfigError("APIGATE_ROUTES strip_prefix must be a boolean");
+        }
+        const bool strip_prefix = entry.value("strip_prefix", false);
+        routes.push_back(
+            {std::move(prefix), {std::move(validated_host), port, timeout}, strip_prefix});
     }
     return routes;
 }
