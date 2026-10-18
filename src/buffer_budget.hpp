@@ -5,15 +5,18 @@
 #include <memory>
 #include <optional>
 
-namespace apigate::detail {
+namespace apigate::detail
+{
 
-enum class BodyReservationKind : std::uint8_t {
+enum class BodyReservationKind : std::uint8_t
+{
     none,
     reserve,
     too_large,
 };
 
-struct BodyReservationPlan {
+struct BodyReservationPlan
+{
     BodyReservationKind kind{BodyReservationKind::none};
     std::uint64_t bytes{0};
 };
@@ -24,7 +27,8 @@ struct BodyReservationPlan {
 
 class BufferBudgetControl;
 
-class BufferBudgetPermit {
+class BufferBudgetPermit
+{
    public:
     BufferBudgetPermit() = default;
     ~BufferBudgetPermit();
@@ -48,7 +52,8 @@ class BufferBudgetPermit {
     std::uint64_t bytes_{0};
 };
 
-class BufferBudgetState {
+class BufferBudgetState
+{
    public:
     explicit BufferBudgetState(std::uint64_t max_bytes);
 

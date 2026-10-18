@@ -8,9 +8,11 @@
 #include <string_view>
 #include <vector>
 
-namespace apigate {
+namespace apigate
+{
 
-enum class LogLevel : std::uint8_t {
+enum class LogLevel : std::uint8_t
+{
     trace,
     debug,
     info,
@@ -19,19 +21,22 @@ enum class LogLevel : std::uint8_t {
     critical,
 };
 
-struct UpstreamConfig {
+struct UpstreamConfig
+{
     std::string host;
     std::uint16_t port;
     std::uint32_t timeout_ms{3000};
 };
 
-struct RouteConfig {
+struct RouteConfig
+{
     std::string prefix;
     UpstreamConfig upstream;
     bool strip_prefix{false};
 };
 
-struct AppConfig {
+struct AppConfig
+{
     std::string service_name{"api-gate"};
     std::string environment{"development"};
     LogLevel log_level{LogLevel::info};
@@ -45,7 +50,8 @@ struct AppConfig {
     std::vector<RouteConfig> routes;
 };
 
-class ConfigError : public std::runtime_error {
+class ConfigError : public std::runtime_error
+{
    public:
     using std::runtime_error::runtime_error;
 };

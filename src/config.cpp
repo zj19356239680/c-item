@@ -13,268 +13,342 @@
 #include <system_error>
 #include <utility>
 
-namespace apigate {
-namespace {
+namespace apigate
+{
+namespace
+{
 
 constexpr std::size_t max_label_length = 64;
 constexpr std::size_t max_hostname_length = 253;
 constexpr std::uint32_t max_timeout_ms = 60000;
 constexpr std::uint64_t max_in_flight_bytes_limit = 1073741824;
 
-[[nodiscard]] const char* raw_environment(const char* name) {
+[[nodiscard]] const char* raw_environment(const char* name)
+{
     // Configuration is loaded once, before any worker threads can mutate the environment.
     return std::getenv(name);  // NOLINT(concurrency-mt-unsafe)
 }
 
-[[nodiscard]] std::optional<std::string> read_environment(const char* name) {
+[[nodiscard]] std::optional<std::string> read_environment(const char* name)
+{
     const char* value = raw_environment(name);
-    if (value == nullptr) {
+    if (value == nullptr)
+    {
         return std::nullopt;
     }
-    if (*value == '\0') {
+    if (*value == '\0')
+    {
         throw ConfigError(std::string{name} + " must not be empty");
     }
     return std::string{value};
 }
 
-void validate_label(std::string_view value, const char* variable_name) {
-    const bool valid_character = std::ranges::all_of(value, [](unsigned char character) {
-        return std::isalnum(character) != 0 || character == '-' || character == '_' ||
-               character == '.';
-    });
-    if (value.size() > max_label_length || !valid_character) {
+void validate_label(std::string_view value, const char* variable_name)
+{
+    const bool valid_character =
+        std::ranges::all_of(value,
+                            [](unsigned char character)
+                            {
+                                return std::isalnum(character) != 0 || character == '-' ||
+                                       character == '_' || character == '.';
+                            });
+    if (value.size() > max_label_length || !valid_character)
+    {
         throw ConfigError(std::string{variable_name} +
                           " must be 1-64 characters using letters, digits, '.', '_' or '-'");
     }
 }
 
-[[nodiscard]] LogLevel parse_log_level(std::string_view value) {
-    if (value == "trace") {
+[[nodiscard]] LogLevel parse_log_level(std::string_view value)
+{
+    if (value == "trace")
+    {
         return LogLevel::trace;
     }
-    if (value == "debug") {
+    if (value == "debug")
+    {
         return LogLevel::debug;
     }
-    if (value == "info") {
+    if (value == "info")
+    {
         return LogLevel::info;
     }
-    if (value == "warn") {
+    if (value == "warn")
+    {
         return LogLevel::warn;
     }
-    if (value == "error") {
+    if (value == "error")
+    {
         return LogLevel::error;
     }
-    if (value == "critical") {
+    if (value == "critical")
+    {
         return LogLevel::critical;
     }
     throw ConfigError(
         "APIGATE_LOG_LEVEL must be one of trace, debug, info, warn, error or critical");
 }
 
-[[nodiscard]] std::string parse_listen_address(std::string_view value) {
+[[nodiscard]] std::string parse_listen_address(std::string_view value)
+{
     boost::system::error_code error;
     const auto address = boost::asio::ip::make_address(value, error);
-    if (error) {
+    if (error)
+    {
         throw ConfigError("APIGATE_LISTEN_ADDRESS must be a valid IPv4 or IPv6 address");
     }
     return address.to_string();
 }
 
-[[nodiscard]] std::uint16_t parse_listen_port(std::string_view value) {
+[[nodiscard]] std::uint16_t parse_listen_port(std::string_view value)
+{
     unsigned int port = 0;
     const auto result = std::from_chars(value.data(), value.data() + value.size(), port);
     if (result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
-        port > std::numeric_limits<std::uint16_t>::max()) {
+        port > std::numeric_limits<std::uint16_t>::max())
+    {
         throw ConfigError("APIGATE_LISTEN_PORT must be an integer from 0 to 65535");
     }
     return static_cast<std::uint16_t>(port);
 }
 
-[[nodiscard]] std::uint16_t parse_upstream_port(std::string_view value) {
+[[nodiscard]] std::uint16_t parse_upstream_port(std::string_view value)
+{
     unsigned int port = 0;
     const auto result = std::from_chars(value.data(), value.data() + value.size(), port);
     if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || port == 0 ||
-        port > std::numeric_limits<std::uint16_t>::max()) {
+        port > std::numeric_limits<std::uint16_t>::max())
+    {
         throw ConfigError("APIGATE_UPSTREAM_PORT must be an integer from 1 to 65535");
     }
     return static_cast<std::uint16_t>(port);
 }
 
-[[nodiscard]] std::uint16_t parse_capacity_limit(std::string_view value,
-                                                 const char* variable_name) {
+[[nodiscard]] std::uint16_t parse_capacity_limit(std::string_view value, const char* variable_name)
+{
     unsigned int limit = 0;
     const auto result = std::from_chars(value.data(), value.data() + value.size(), limit);
     if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || limit == 0 ||
-        limit > std::numeric_limits<std::uint16_t>::max()) {
+        limit > std::numeric_limits<std::uint16_t>::max())
+    {
         throw ConfigError(std::string{variable_name} + " must be an integer from 1 to 65535");
     }
     return static_cast<std::uint16_t>(limit);
 }
 
 [[nodiscard]] std::uint32_t parse_bounded_milliseconds(std::string_view value,
-                                                       const char* variable_name) {
+                                                       const char* variable_name)
+{
     std::uint32_t timeout = 0;
     const auto result = std::from_chars(value.data(), value.data() + value.size(), timeout);
     if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || timeout == 0 ||
-        timeout > max_timeout_ms) {
+        timeout > max_timeout_ms)
+    {
         throw ConfigError(std::string{variable_name} + " must be an integer from 1 to 60000");
     }
     return timeout;
 }
 
-[[nodiscard]] std::uint64_t parse_max_in_flight_bytes(std::string_view value) {
+[[nodiscard]] std::uint64_t parse_max_in_flight_bytes(std::string_view value)
+{
     std::uint64_t bytes = 0;
     const auto result = std::from_chars(value.data(), value.data() + value.size(), bytes);
     if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || bytes == 0 ||
-        bytes > max_in_flight_bytes_limit) {
+        bytes > max_in_flight_bytes_limit)
+    {
         throw ConfigError("APIGATE_MAX_IN_FLIGHT_BYTES must be an integer from 1 to 1073741824");
     }
     return bytes;
 }
 
-void validate_dns_hostname(std::string_view value) {
-    if (value.size() > max_hostname_length || value.front() == '.' || value.back() == '.') {
+void validate_dns_hostname(std::string_view value)
+{
+    if (value.size() > max_hostname_length || value.front() == '.' || value.back() == '.')
+    {
         throw ConfigError("APIGATE_UPSTREAM_HOST must be a valid hostname or IP address");
     }
 
     std::size_t label_length = 0;
     bool label_starts_with_hyphen = false;
     char previous = '\0';
-    for (const char raw_character : value) {
+    for (const char raw_character : value)
+    {
         const auto character = static_cast<unsigned char>(raw_character);
-        if (character == '.') {
+        if (character == '.')
+        {
             if (label_length == 0 || label_length > 63 || label_starts_with_hyphen ||
-                previous == '-') {
+                previous == '-')
+            {
                 throw ConfigError("APIGATE_UPSTREAM_HOST must be a valid hostname or IP address");
             }
             label_length = 0;
             label_starts_with_hyphen = false;
-        } else if (std::isalnum(character) != 0 || character == '-') {
-            if (label_length == 0) {
+        }
+        else if (std::isalnum(character) != 0 || character == '-')
+        {
+            if (label_length == 0)
+            {
                 label_starts_with_hyphen = character == '-';
             }
             ++label_length;
-        } else {
+        }
+        else
+        {
             throw ConfigError("APIGATE_UPSTREAM_HOST must be a valid hostname or IP address");
         }
         previous = static_cast<char>(character);
     }
-    if (label_length == 0 || label_length > 63 || label_starts_with_hyphen || previous == '-') {
+    if (label_length == 0 || label_length > 63 || label_starts_with_hyphen || previous == '-')
+    {
         throw ConfigError("APIGATE_UPSTREAM_HOST must be a valid hostname or IP address");
     }
 }
 
-[[nodiscard]] std::string parse_upstream_host(std::string_view value) {
+[[nodiscard]] std::string parse_upstream_host(std::string_view value)
+{
     boost::system::error_code error;
     const auto address = boost::asio::ip::make_address(value, error);
-    if (!error) {
+    if (!error)
+    {
         return address.to_string();
     }
     validate_dns_hostname(value);
     return std::string{value};
 }
 
-void validate_route_prefix(std::string_view prefix) {
-    if (prefix.empty() || prefix.front() != '/') {
+void validate_route_prefix(std::string_view prefix)
+{
+    if (prefix.empty() || prefix.front() != '/')
+    {
         throw ConfigError("APIGATE_ROUTES prefix must start with '/'");
     }
-    if (prefix == "/") {
+    if (prefix == "/")
+    {
         return;
     }
     std::size_t begin = 1;
-    while (begin <= prefix.size()) {
+    while (begin <= prefix.size())
+    {
         const auto end = prefix.find('/', begin);
         const auto segment =
             prefix.substr(begin, end == std::string_view::npos ? end : end - begin);
-        const bool valid = std::ranges::all_of(segment, [](char character) {
-            return (character >= 'a' && character <= 'z') ||
-                   (character >= 'A' && character <= 'Z') ||
-                   (character >= '0' && character <= '9') || character == '-' || character == '.' ||
-                   character == '_' || character == '~';
-        });
-        if (segment.empty() || segment == "." || segment == ".." || !valid) {
+        const bool valid = std::ranges::all_of(segment,
+                                               [](char character)
+                                               {
+                                                   return (character >= 'a' && character <= 'z') ||
+                                                          (character >= 'A' && character <= 'Z') ||
+                                                          (character >= '0' && character <= '9') ||
+                                                          character == '-' || character == '.' ||
+                                                          character == '_' || character == '~';
+                                               });
+        if (segment.empty() || segment == "." || segment == ".." || !valid)
+        {
             throw ConfigError("APIGATE_ROUTES prefix contains an invalid path segment");
         }
-        if (end == std::string_view::npos) {
+        if (end == std::string_view::npos)
+        {
             break;
         }
         begin = end + 1;
     }
 }
 
-[[nodiscard]] std::uint64_t route_integer(const nlohmann::json& value, std::uint64_t maximum) {
+[[nodiscard]] std::uint64_t route_integer(const nlohmann::json& value, std::uint64_t maximum)
+{
     if (!value.is_number_integer() ||
-        (!value.is_number_unsigned() && value.get<std::int64_t>() < 0)) {
+        (!value.is_number_unsigned() && value.get<std::int64_t>() < 0))
+    {
         throw ConfigError("APIGATE_ROUTES port and timeout_ms must be positive integers");
     }
     const auto number = value.get<std::uint64_t>();
-    if (number == 0 || number > maximum) {
+    if (number == 0 || number > maximum)
+    {
         throw ConfigError("APIGATE_ROUTES port or timeout_ms is out of range");
     }
     return number;
 }
 
-[[nodiscard]] std::vector<RouteConfig> parse_routes(std::string_view value) {
-    if (value.size() > std::size_t{64} * 1024) {
+[[nodiscard]] std::vector<RouteConfig> parse_routes(std::string_view value)
+{
+    if (value.size() > std::size_t{64} * 1024)
+    {
         throw ConfigError("APIGATE_ROUTES must not exceed 65536 bytes");
     }
     using Json = nlohmann::json;
     std::set<std::string> keys;
     std::size_t object_count = 0;
-    const auto callback = [&keys, &object_count](int depth, Json::parse_event_t event,
-                                                 Json& parsed) {
-        if (event == Json::parse_event_t::array_start && depth != 0) {
+    const auto callback = [&keys, &object_count](int depth, Json::parse_event_t event, Json& parsed)
+    {
+        if (event == Json::parse_event_t::array_start && depth != 0)
+        {
             throw ConfigError("APIGATE_ROUTES must be an array of flat route objects");
         }
-        if (event == Json::parse_event_t::object_start) {
-            if (depth != 1 || ++object_count > 32) {
+        if (event == Json::parse_event_t::object_start)
+        {
+            if (depth != 1 || ++object_count > 32)
+            {
                 throw ConfigError("APIGATE_ROUTES must contain at most 32 flat route objects");
             }
             keys.clear();
         }
-        if (event == Json::parse_event_t::key && !keys.insert(parsed.get<std::string>()).second) {
+        if (event == Json::parse_event_t::key && !keys.insert(parsed.get<std::string>()).second)
+        {
             throw ConfigError("APIGATE_ROUTES contains a duplicate object field");
         }
         return true;
     };
     Json document;
-    try {
+    try
+    {
         document = Json::parse(value, callback);
-    } catch (const Json::exception&) {
+    }
+    catch (const Json::exception&)
+    {
         throw ConfigError("APIGATE_ROUTES must contain valid JSON");
     }
-    if (!document.is_array() || document.empty() || document.size() > 32) {
+    if (!document.is_array() || document.empty() || document.size() > 32)
+    {
         throw ConfigError("APIGATE_ROUTES must contain 1-32 route objects");
     }
     std::vector<RouteConfig> routes;
     std::set<std::string> prefixes;
-    for (const auto& entry : document) {
+    for (const auto& entry : document)
+    {
         if (!entry.is_object() || !entry.contains("prefix") || !entry.contains("host") ||
-            !entry.contains("port")) {
+            !entry.contains("port"))
+        {
             throw ConfigError("APIGATE_ROUTES entry requires prefix, host and port");
         }
-        for (const auto& item : entry.items()) {
+        for (const auto& item : entry.items())
+        {
             if (item.key() != "prefix" && item.key() != "host" && item.key() != "port" &&
-                item.key() != "timeout_ms" && item.key() != "strip_prefix") {
+                item.key() != "timeout_ms" && item.key() != "strip_prefix")
+            {
                 throw ConfigError("APIGATE_ROUTES entry contains an unknown field");
             }
         }
-        if (!entry.at("prefix").is_string() || !entry.at("host").is_string()) {
+        if (!entry.at("prefix").is_string() || !entry.at("host").is_string())
+        {
             throw ConfigError("APIGATE_ROUTES prefix and host must be strings");
         }
         auto prefix = entry.at("prefix").get<std::string>();
         validate_route_prefix(prefix);
-        if (!prefixes.insert(prefix).second) {
+        if (!prefixes.insert(prefix).second)
+        {
             throw ConfigError("APIGATE_ROUTES contains a duplicate prefix");
         }
         const auto host = entry.at("host").get<std::string>();
         std::string validated_host;
-        try {
-            if (host.empty()) {
+        try
+        {
+            if (host.empty())
+            {
                 throw ConfigError("empty host");
             }
             validated_host = parse_upstream_host(host);
-        } catch (const ConfigError&) {
+        }
+        catch (const ConfigError&)
+        {
             throw ConfigError("APIGATE_ROUTES host must be a valid hostname or IP address");
         }
         const auto port = static_cast<std::uint16_t>(route_integer(entry.at("port"), 65535));
@@ -282,7 +356,8 @@ void validate_route_prefix(std::string_view prefix) {
             entry.contains("timeout_ms")
                 ? static_cast<std::uint32_t>(route_integer(entry.at("timeout_ms"), 60000))
                 : 3000U;
-        if (entry.contains("strip_prefix") && !entry.at("strip_prefix").is_boolean()) {
+        if (entry.contains("strip_prefix") && !entry.at("strip_prefix").is_boolean())
+        {
             throw ConfigError("APIGATE_ROUTES strip_prefix must be a boolean");
         }
         const bool strip_prefix = entry.value("strip_prefix", false);
@@ -294,46 +369,58 @@ void validate_route_prefix(std::string_view prefix) {
 
 }  // namespace
 
-AppConfig load_config_from_environment() {
+AppConfig load_config_from_environment()
+{
     AppConfig config;
-    if (const auto value = read_environment("APIGATE_SERVICE_NAME")) {
+    if (const auto value = read_environment("APIGATE_SERVICE_NAME"))
+    {
         validate_label(*value, "APIGATE_SERVICE_NAME");
         config.service_name = *value;
     }
-    if (const auto value = read_environment("APIGATE_ENVIRONMENT")) {
+    if (const auto value = read_environment("APIGATE_ENVIRONMENT"))
+    {
         validate_label(*value, "APIGATE_ENVIRONMENT");
         config.environment = *value;
     }
-    if (const auto value = read_environment("APIGATE_LOG_LEVEL")) {
+    if (const auto value = read_environment("APIGATE_LOG_LEVEL"))
+    {
         config.log_level = parse_log_level(*value);
     }
-    if (const auto value = read_environment("APIGATE_LISTEN_ADDRESS")) {
+    if (const auto value = read_environment("APIGATE_LISTEN_ADDRESS"))
+    {
         config.listen_address = parse_listen_address(*value);
     }
-    if (const auto value = read_environment("APIGATE_LISTEN_PORT")) {
+    if (const auto value = read_environment("APIGATE_LISTEN_PORT"))
+    {
         config.listen_port = parse_listen_port(*value);
     }
-    if (const auto value = read_environment("APIGATE_MAX_CONNECTIONS")) {
+    if (const auto value = read_environment("APIGATE_MAX_CONNECTIONS"))
+    {
         config.max_connections = parse_capacity_limit(*value, "APIGATE_MAX_CONNECTIONS");
     }
-    if (const auto value = read_environment("APIGATE_MAX_CONCURRENT_PROXIES")) {
+    if (const auto value = read_environment("APIGATE_MAX_CONCURRENT_PROXIES"))
+    {
         config.max_concurrent_proxies =
             parse_capacity_limit(*value, "APIGATE_MAX_CONCURRENT_PROXIES");
     }
-    if (const auto value = read_environment("APIGATE_MAX_IN_FLIGHT_BYTES")) {
+    if (const auto value = read_environment("APIGATE_MAX_IN_FLIGHT_BYTES"))
+    {
         config.max_in_flight_bytes = parse_max_in_flight_bytes(*value);
     }
-    if (const auto value = read_environment("APIGATE_SHUTDOWN_GRACE_MS")) {
+    if (const auto value = read_environment("APIGATE_SHUTDOWN_GRACE_MS"))
+    {
         config.shutdown_grace_ms = parse_bounded_milliseconds(*value, "APIGATE_SHUTDOWN_GRACE_MS");
     }
 
     if (raw_environment("APIGATE_ROUTES") != nullptr &&
         (raw_environment("APIGATE_UPSTREAM_HOST") != nullptr ||
          raw_environment("APIGATE_UPSTREAM_PORT") != nullptr ||
-         raw_environment("APIGATE_UPSTREAM_TIMEOUT_MS") != nullptr)) {
+         raw_environment("APIGATE_UPSTREAM_TIMEOUT_MS") != nullptr))
+    {
         throw ConfigError("APIGATE_ROUTES conflicts with legacy upstream variables");
     }
-    if (const auto routes = read_environment("APIGATE_ROUTES")) {
+    if (const auto routes = read_environment("APIGATE_ROUTES"))
+    {
         config.routes = parse_routes(*routes);
         return config;
     }
@@ -341,15 +428,18 @@ AppConfig load_config_from_environment() {
     const auto upstream_port = read_environment("APIGATE_UPSTREAM_PORT");
     const auto upstream_timeout = read_environment("APIGATE_UPSTREAM_TIMEOUT_MS");
     if (upstream_host.has_value() != upstream_port.has_value() ||
-        (upstream_timeout.has_value() && !upstream_host.has_value())) {
+        (upstream_timeout.has_value() && !upstream_host.has_value()))
+    {
         throw ConfigError(
             "APIGATE_UPSTREAM_HOST and APIGATE_UPSTREAM_PORT must be set together; "
             "APIGATE_UPSTREAM_TIMEOUT_MS requires both");
     }
-    if (upstream_host) {
+    if (upstream_host)
+    {
         UpstreamConfig upstream{parse_upstream_host(*upstream_host),
                                 parse_upstream_port(*upstream_port), 3000};
-        if (upstream_timeout) {
+        if (upstream_timeout)
+        {
             upstream.timeout_ms =
                 parse_bounded_milliseconds(*upstream_timeout, "APIGATE_UPSTREAM_TIMEOUT_MS");
         }
@@ -358,8 +448,10 @@ AppConfig load_config_from_environment() {
     return config;
 }
 
-std::string_view to_string(LogLevel level) noexcept {
-    switch (level) {
+std::string_view to_string(LogLevel level) noexcept
+{
+    switch (level)
+    {
         case LogLevel::trace:
             return "trace";
         case LogLevel::debug:

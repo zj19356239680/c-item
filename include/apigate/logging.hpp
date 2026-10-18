@@ -7,13 +7,16 @@
 
 #include "apigate/config.hpp"
 
-namespace spdlog {
+namespace spdlog
+{
 class logger;  // NOLINT(readability-identifier-naming): name is fixed by spdlog's API.
 }
 
-namespace apigate {
+namespace apigate
+{
 
-class StructuredLogger {
+class StructuredLogger
+{
    public:
     explicit StructuredLogger(const AppConfig& config);
 

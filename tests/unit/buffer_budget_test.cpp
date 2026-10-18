@@ -8,17 +8,20 @@
 #include <stdexcept>
 #include <utility>
 
-namespace {
+namespace
+{
 
 using apigate::detail::BodyReservationKind;
 using apigate::detail::BufferBudgetPermit;
 using apigate::detail::BufferBudgetState;
 
-[[nodiscard]] BufferBudgetPermit take_permit(std::optional<BufferBudgetPermit> permit) noexcept {
+[[nodiscard]] BufferBudgetPermit take_permit(std::optional<BufferBudgetPermit> permit) noexcept
+{
     return std::move(permit).value_or(BufferBudgetPermit{});
 }
 
-TEST(BufferBudgetTest, AcquiresExactlyTheLimitAndRejectsMore) {
+TEST(BufferBudgetTest, AcquiresExactlyTheLimitAndRejectsMore)
+{
     BufferBudgetState budget{10};
 
     auto permit = budget.try_acquire(10);
@@ -28,7 +31,8 @@ TEST(BufferBudgetTest, AcquiresExactlyTheLimitAndRejectsMore) {
     EXPECT_FALSE(budget.try_acquire(1).has_value());
 }
 
-TEST(BufferBudgetTest, MultiplePermitsShareOneStateAndReleasedCapacityCanBeReused) {
+TEST(BufferBudgetTest, MultiplePermitsShareOneStateAndReleasedCapacityCanBeReused)
+{
     BufferBudgetState budget{10};
     auto first_permit = take_permit(budget.try_acquire(4));
     auto second_permit = take_permit(budget.try_acquire(6));
@@ -43,7 +47,8 @@ TEST(BufferBudgetTest, MultiplePermitsShareOneStateAndReleasedCapacityCanBeReuse
     EXPECT_TRUE(second_permit.owns_reservation());
 }
 
-TEST(BufferBudgetTest, DestructorAndExceptionUnwindReleaseCapacity) {
+TEST(BufferBudgetTest, DestructorAndExceptionUnwindReleaseCapacity)
+{
     BufferBudgetState budget{8};
     {
         auto permit = budget.try_acquire(8);
@@ -51,17 +56,21 @@ TEST(BufferBudgetTest, DestructorAndExceptionUnwindReleaseCapacity) {
     }
     EXPECT_EQ(budget.current_bytes(), 0U);
 
-    try {
+    try
+    {
         auto permit = budget.try_acquire(8);
         ASSERT_TRUE(permit.has_value());
         throw std::runtime_error{"test failure"};
-    } catch (const std::runtime_error& error) {
+    }
+    catch (const std::runtime_error& error)
+    {
         EXPECT_STREQ(error.what(), "test failure");
     }
     EXPECT_EQ(budget.current_bytes(), 0U);
 }
 
-TEST(BufferBudgetTest, ExplicitReleaseAndCancellationStyleRepeatAreIdempotent) {
+TEST(BufferBudgetTest, ExplicitReleaseAndCancellationStyleRepeatAreIdempotent)
+{
     BufferBudgetState budget{5};
     auto owned_permit = take_permit(budget.try_acquire(5));
     ASSERT_TRUE(owned_permit.owns_reservation());
@@ -74,7 +83,8 @@ TEST(BufferBudgetTest, ExplicitReleaseAndCancellationStyleRepeatAreIdempotent) {
     EXPECT_TRUE(budget.try_acquire(5).has_value());
 }
 
-TEST(BufferBudgetTest, MoveConstructionTransfersOwnership) {
+TEST(BufferBudgetTest, MoveConstructionTransfersOwnership)
+{
     BufferBudgetState budget{7};
     auto source = take_permit(budget.try_acquire(7));
     ASSERT_TRUE(source.owns_reservation());
@@ -86,7 +96,8 @@ TEST(BufferBudgetTest, MoveConstructionTransfersOwnership) {
     EXPECT_EQ(budget.current_bytes(), 0U);
 }
 
-TEST(BufferBudgetTest, MoveAssignmentReleasesOldReservationAndTransfersNewOne) {
+TEST(BufferBudgetTest, MoveAssignmentReleasesOldReservationAndTransfersNewOne)
+{
     BufferBudgetState budget{12};
     auto first_permit = take_permit(budget.try_acquire(5));
     ASSERT_TRUE(first_permit.owns_reservation());
@@ -100,7 +111,8 @@ TEST(BufferBudgetTest, MoveAssignmentReleasesOldReservationAndTransfersNewOne) {
     EXPECT_EQ(first_permit.reserved_bytes(), 7U);
 }
 
-TEST(BufferBudgetTest, ShrinkReturnsDifferenceAndRejectsGrowth) {
+TEST(BufferBudgetTest, ShrinkReturnsDifferenceAndRejectsGrowth)
+{
     BufferBudgetState budget{20};
     auto owned_permit = take_permit(budget.try_acquire(20));
     ASSERT_TRUE(owned_permit.owns_reservation());
@@ -112,7 +124,8 @@ TEST(BufferBudgetTest, ShrinkReturnsDifferenceAndRejectsGrowth) {
     EXPECT_EQ(budget.current_bytes(), 6U);
 }
 
-TEST(BufferBudgetTest, SupportsZeroByteAndUint64MaximumBoundariesWithoutOverflow) {
+TEST(BufferBudgetTest, SupportsZeroByteAndUint64MaximumBoundariesWithoutOverflow)
+{
     BufferBudgetState budget{std::numeric_limits<std::uint64_t>::max()};
     auto zero = budget.try_acquire(0);
     auto almost_all = budget.try_acquire(std::numeric_limits<std::uint64_t>::max() - 1);
@@ -124,7 +137,8 @@ TEST(BufferBudgetTest, SupportsZeroByteAndUint64MaximumBoundariesWithoutOverflow
     EXPECT_TRUE(budget.try_acquire(1).has_value());
 }
 
-TEST(BufferBudgetTest, PlansKnownUnknownEmptyAndOversizedBodies) {
+TEST(BufferBudgetTest, PlansKnownUnknownEmptyAndOversizedBodies)
+{
     const auto known = apigate::detail::plan_body_reservation(12, false, 64);
     const auto unknown = apigate::detail::plan_body_reservation(std::nullopt, false, 64);
     const auto empty = apigate::detail::plan_body_reservation(0, true, 64);

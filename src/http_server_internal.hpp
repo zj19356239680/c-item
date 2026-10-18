@@ -10,81 +10,97 @@
 #include <type_traits>
 #include <utility>
 
-namespace apigate::detail {
+namespace apigate::detail
+{
 
-enum class HttpWriteDisposition : std::uint8_t {
+enum class HttpWriteDisposition : std::uint8_t
+{
     success,
     expected_cancellation,
     client_disconnected,
     unexpected_error,
 };
 
-enum class AcceptRetryDisposition : std::uint8_t {
+enum class AcceptRetryDisposition : std::uint8_t
+{
     retry,
     stopped,
     fatal,
 };
 
-enum class AcceptCapacityAction : std::uint8_t {
+enum class AcceptCapacityAction : std::uint8_t
+{
     none,
     start_accept,
     pause,
     resume_and_start,
 };
 
-enum class ServerDrainPhase : std::uint8_t {
+enum class ServerDrainPhase : std::uint8_t
+{
     running,
     draining,
     force_stopping,
     completed,
 };
 
-enum class DrainStartResult : std::uint8_t {
+enum class DrainStartResult : std::uint8_t
+{
     unchanged,
     started,
     completed,
 };
 
-enum class DrainTimerDisposition : std::uint8_t {
+enum class DrainTimerDisposition : std::uint8_t
+{
     ignored,
     timed_out,
     fatal,
 };
 
-enum class SessionPhase : std::uint8_t {
+enum class SessionPhase : std::uint8_t
+{
     reading,
     proxying,
     writing,
     finished,
 };
 
-enum class SessionDrainDisposition : std::uint8_t {
+enum class SessionDrainDisposition : std::uint8_t
+{
     close_immediately,
     wait_for_current,
     ignored,
 };
 
-enum class ShutdownSignalDisposition : std::uint8_t {
+enum class ShutdownSignalDisposition : std::uint8_t
+{
     begin_drain,
     force_stop,
     ignored,
     fatal,
 };
 
-class ShutdownSignalState {
+class ShutdownSignalState
+{
    public:
     [[nodiscard]] ShutdownSignalDisposition on_wait_completion(
-        const boost::system::error_code& error) noexcept {
-        if (error) {
-            if (completed_ && error == boost::asio::error::operation_aborted) {
+        const boost::system::error_code& error) noexcept
+    {
+        if (error)
+        {
+            if (completed_ && error == boost::asio::error::operation_aborted)
+            {
                 return ShutdownSignalDisposition::ignored;
             }
             return ShutdownSignalDisposition::fatal;
         }
-        if (completed_ || force_requested_) {
+        if (completed_ || force_requested_)
+        {
             return ShutdownSignalDisposition::ignored;
         }
-        if (!draining_) {
+        if (!draining_)
+        {
             draining_ = true;
             return ShutdownSignalDisposition::begin_drain;
         }
@@ -92,7 +108,10 @@ class ShutdownSignalState {
         return ShutdownSignalDisposition::force_stop;
     }
 
-    void mark_completed() noexcept { completed_ = true; }
+    void mark_completed() noexcept
+    {
+        completed_ = true;
+    }
 
    private:
     bool draining_{false};
@@ -100,7 +119,8 @@ class ShutdownSignalState {
     bool completed_{false};
 };
 
-class DrainState {
+class DrainState
+{
    public:
     void session_started() noexcept;
     [[nodiscard]] bool session_finished() noexcept;
@@ -117,7 +137,8 @@ class DrainState {
     std::size_t active_sessions_{0};
 };
 
-class AcceptCapacityState {
+class AcceptCapacityState
+{
    public:
     explicit AcceptCapacityState(std::size_t max_connections) noexcept;
 
@@ -143,7 +164,8 @@ class AcceptCapacityState {
 
 class ProxyAdmissionState;
 
-class ProxyPermit {
+class ProxyPermit
+{
    public:
     [[nodiscard]] static std::optional<ProxyPermit> try_acquire(
         std::shared_ptr<ProxyAdmissionState> state) noexcept;
@@ -164,7 +186,8 @@ class ProxyPermit {
     std::shared_ptr<ProxyAdmissionState> state_;
 };
 
-class ProxyAdmissionState {
+class ProxyAdmissionState
+{
    public:
     explicit ProxyAdmissionState(std::size_t max_proxies) noexcept;
 
@@ -179,10 +202,13 @@ class ProxyAdmissionState {
     std::size_t active_proxies_{0};
 };
 
-class RuntimeFailureState {
+class RuntimeFailureState
+{
    public:
-    [[nodiscard]] bool claim() noexcept {
-        if (claimed_) {
+    [[nodiscard]] bool claim() noexcept
+    {
+        if (claimed_)
+        {
             return false;
         }
         claimed_ = true;
@@ -197,18 +223,23 @@ template <typename ReportAction, typename FallbackAction, typename StopAction,
           typename NotifyAction>
 void run_accept_retry_failure_actions(RuntimeFailureState& state, ReportAction&& report,
                                       FallbackAction&& fallback, StopAction&& stop,
-                                      NotifyAction&& notify) noexcept {
+                                      NotifyAction&& notify) noexcept
+{
     static_assert(std::is_nothrow_invocable_v<FallbackAction&&>);
     static_assert(std::is_nothrow_invocable_v<StopAction&&>);
     static_assert(std::is_nothrow_invocable_v<NotifyAction&&>);
 
-    if (!state.claim()) {
+    if (!state.claim())
+    {
         return;
     }
 
-    try {
+    try
+    {
         std::forward<ReportAction>(report)();
-    } catch (...) {
+    }
+    catch (...)
+    {
         std::forward<FallbackAction>(fallback)();
     }
     std::forward<StopAction>(stop)();

@@ -3,12 +3,14 @@
 
 #include <memory>
 
-namespace apigate {
+namespace apigate
+{
 
 struct AppConfig;
 class StructuredLogger;
 
-class Application {
+class Application
+{
    public:
     Application(const AppConfig& config, StructuredLogger& logger);
     ~Application();

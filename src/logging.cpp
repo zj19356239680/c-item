@@ -9,11 +9,15 @@
 #include <string>
 #include <utility>
 
-namespace apigate {
-namespace {
+namespace apigate
+{
+namespace
+{
 
-[[nodiscard]] spdlog::level::level_enum to_spdlog_level(LogLevel level) noexcept {
-    switch (level) {
+[[nodiscard]] spdlog::level::level_enum to_spdlog_level(LogLevel level) noexcept
+{
+    switch (level)
+    {
         case LogLevel::trace:
             return spdlog::level::trace;
         case LogLevel::debug:
@@ -36,7 +40,8 @@ StructuredLogger::StructuredLogger(const AppConfig& config)
     : service_name_(config.service_name),
       environment_(config.environment),
       logger_(std::make_shared<spdlog::logger>("apigate",
-                                               std::make_shared<spdlog::sinks::stdout_sink_mt>())) {
+                                               std::make_shared<spdlog::sinks::stdout_sink_mt>()))
+{
     auto formatter = std::make_unique<spdlog::pattern_formatter>(
         R"({"timestamp":"%Y-%m-%dT%H:%M:%S.%eZ","level":"%l","payload":%v})",
         spdlog::pattern_time_type::utc);
@@ -46,11 +51,14 @@ StructuredLogger::StructuredLogger(const AppConfig& config)
 }
 
 nlohmann::json StructuredLogger::make_payload(std::string_view event,
-                                              const nlohmann::json& fields) const {
-    if (event.empty()) {
+                                              const nlohmann::json& fields) const
+{
+    if (event.empty())
+    {
         throw std::invalid_argument("log event must not be empty");
     }
-    if (!fields.is_null() && !fields.is_object()) {
+    if (!fields.is_null() && !fields.is_object())
+    {
         throw std::invalid_argument("log fields must be a JSON object");
     }
 
@@ -61,23 +69,28 @@ nlohmann::json StructuredLogger::make_payload(std::string_view event,
     return payload;
 }
 
-void StructuredLogger::info(std::string_view event, const nlohmann::json& fields) {
+void StructuredLogger::info(std::string_view event, const nlohmann::json& fields)
+{
     logger_->info("{}", make_payload(event, fields).dump());
 }
 
-void StructuredLogger::warn(std::string_view event, const nlohmann::json& fields) {
+void StructuredLogger::warn(std::string_view event, const nlohmann::json& fields)
+{
     logger_->warn("{}", make_payload(event, fields).dump());
 }
 
-void StructuredLogger::error(std::string_view event, const nlohmann::json& fields) {
+void StructuredLogger::error(std::string_view event, const nlohmann::json& fields)
+{
     logger_->error("{}", make_payload(event, fields).dump());
 }
 
-void StructuredLogger::critical(std::string_view event, const nlohmann::json& fields) {
+void StructuredLogger::critical(std::string_view event, const nlohmann::json& fields)
+{
     logger_->critical("{}", make_payload(event, fields).dump());
 }
 
-void StructuredLogger::write_configuration_valid(const nlohmann::json& fields) {
+void StructuredLogger::write_configuration_valid(const nlohmann::json& fields)
+{
     auto result_logger = logger_->clone("apigate-configuration-check");
     result_logger->set_level(spdlog::level::info);
     result_logger->info("{}", make_payload("configuration_valid", fields).dump());

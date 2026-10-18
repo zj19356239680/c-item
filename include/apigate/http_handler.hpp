@@ -8,12 +8,14 @@
 
 #include "apigate/config.hpp"
 
-namespace apigate {
+namespace apigate
+{
 
 using HttpRequest = boost::beast::http::request<boost::beast::http::string_body>;
 using HttpResponse = boost::beast::http::response<boost::beast::http::string_body>;
 
-enum class GatewayFailure : std::uint8_t {
+enum class GatewayFailure : std::uint8_t
+{
     bad_gateway,
     gateway_timeout,
     gateway_overloaded,
@@ -25,7 +27,8 @@ enum class GatewayFailure : std::uint8_t {
 [[nodiscard]] bool should_proxy_http_request(const AppConfig& config,
                                              const HttpRequest& request) noexcept;
 // Borrows immutable AppConfig storage; consumed synchronously by proxy construction.
-struct SelectedUpstream {
+struct SelectedUpstream
+{
     const UpstreamConfig& upstream;
     std::string_view prefix;
     bool strip_prefix{false};

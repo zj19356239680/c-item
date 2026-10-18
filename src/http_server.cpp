@@ -33,50 +33,64 @@
 #include "http_session_probe.hpp"
 #endif
 
-namespace apigate {
+namespace apigate
+{
 
-namespace detail {
+namespace detail
+{
 
 HttpWriteDisposition classify_http_write_result(const boost::system::error_code& error,
-                                                bool stopping) noexcept {
-    if (stopping || error == boost::asio::error::operation_aborted) {
+                                                bool stopping) noexcept
+{
+    if (stopping || error == boost::asio::error::operation_aborted)
+    {
         return HttpWriteDisposition::expected_cancellation;
     }
-    if (!error) {
+    if (!error)
+    {
         return HttpWriteDisposition::success;
     }
     if (error == boost::asio::error::broken_pipe ||
         error == boost::asio::error::connection_aborted ||
-        error == boost::asio::error::connection_reset || error == boost::asio::error::eof) {
+        error == boost::asio::error::connection_reset || error == boost::asio::error::eof)
+    {
         return HttpWriteDisposition::client_disconnected;
     }
     return HttpWriteDisposition::unexpected_error;
 }
 
 AcceptRetryDisposition classify_accept_retry_completion(const boost::system::error_code& error,
-                                                        bool stopping) noexcept {
-    if (stopping) {
+                                                        bool stopping) noexcept
+{
+    if (stopping)
+    {
         return AcceptRetryDisposition::stopped;
     }
-    if (error) {
+    if (error)
+    {
         return AcceptRetryDisposition::fatal;
     }
     return AcceptRetryDisposition::retry;
 }
 
 DrainTimerDisposition classify_drain_timer_completion(const boost::system::error_code& error,
-                                                      ServerDrainPhase phase) noexcept {
-    if (phase != ServerDrainPhase::draining) {
+                                                      ServerDrainPhase phase) noexcept
+{
+    if (phase != ServerDrainPhase::draining)
+    {
         return DrainTimerDisposition::ignored;
     }
-    if (!error) {
+    if (!error)
+    {
         return DrainTimerDisposition::timed_out;
     }
     return DrainTimerDisposition::fatal;
 }
 
-SessionDrainDisposition classify_session_drain(SessionPhase phase) noexcept {
-    switch (phase) {
+SessionDrainDisposition classify_session_drain(SessionPhase phase) noexcept
+{
+    switch (phase)
+    {
         case SessionPhase::reading:
             return SessionDrainDisposition::close_immediately;
         case SessionPhase::proxying:
@@ -88,46 +102,63 @@ SessionDrainDisposition classify_session_drain(SessionPhase phase) noexcept {
     return SessionDrainDisposition::ignored;
 }
 
-void DrainState::session_started() noexcept {
-    if (phase_ == ServerDrainPhase::running) {
+void DrainState::session_started() noexcept
+{
+    if (phase_ == ServerDrainPhase::running)
+    {
         ++active_sessions_;
     }
 }
 
-bool DrainState::session_finished() noexcept {
-    if (active_sessions_ == 0) {
+bool DrainState::session_finished() noexcept
+{
+    if (active_sessions_ == 0)
+    {
         return false;
     }
     --active_sessions_;
     if (active_sessions_ == 0 &&
-        (phase_ == ServerDrainPhase::draining || phase_ == ServerDrainPhase::force_stopping)) {
+        (phase_ == ServerDrainPhase::draining || phase_ == ServerDrainPhase::force_stopping))
+    {
         phase_ = ServerDrainPhase::completed;
         return true;
     }
     return false;
 }
 
-DrainStartResult DrainState::begin_drain() noexcept {
-    if (phase_ != ServerDrainPhase::running) {
+DrainStartResult DrainState::begin_drain() noexcept
+{
+    if (phase_ != ServerDrainPhase::running)
+    {
         return DrainStartResult::unchanged;
     }
     return transition_to(ServerDrainPhase::draining);
 }
 
-DrainStartResult DrainState::begin_force_stop() noexcept {
-    if (phase_ == ServerDrainPhase::force_stopping || phase_ == ServerDrainPhase::completed) {
+DrainStartResult DrainState::begin_force_stop() noexcept
+{
+    if (phase_ == ServerDrainPhase::force_stopping || phase_ == ServerDrainPhase::completed)
+    {
         return DrainStartResult::unchanged;
     }
     return transition_to(ServerDrainPhase::force_stopping);
 }
 
-ServerDrainPhase DrainState::phase() const noexcept { return phase_; }
+ServerDrainPhase DrainState::phase() const noexcept
+{
+    return phase_;
+}
 
-std::size_t DrainState::active_sessions() const noexcept { return active_sessions_; }
+std::size_t DrainState::active_sessions() const noexcept
+{
+    return active_sessions_;
+}
 
-DrainStartResult DrainState::transition_to(ServerDrainPhase phase) noexcept {
+DrainStartResult DrainState::transition_to(ServerDrainPhase phase) noexcept
+{
     phase_ = phase;
-    if (active_sessions_ == 0) {
+    if (active_sessions_ == 0)
+    {
         phase_ = ServerDrainPhase::completed;
         return DrainStartResult::completed;
     }
@@ -135,14 +166,20 @@ DrainStartResult DrainState::transition_to(ServerDrainPhase phase) noexcept {
 }
 
 AcceptCapacityState::AcceptCapacityState(std::size_t max_connections) noexcept
-    : max_connections_(max_connections) {}
+    : max_connections_(max_connections)
+{
+}
 
-AcceptCapacityAction AcceptCapacityState::next_action() noexcept {
-    if (stopped_ || accept_pending_ || retry_pending_) {
+AcceptCapacityAction AcceptCapacityState::next_action() noexcept
+{
+    if (stopped_ || accept_pending_ || retry_pending_)
+    {
         return AcceptCapacityAction::none;
     }
-    if (active_connections_ >= max_connections_) {
-        if (paused_) {
+    if (active_connections_ >= max_connections_)
+    {
+        if (paused_)
+        {
             return AcceptCapacityAction::none;
         }
         paused_ = true;
@@ -150,83 +187,134 @@ AcceptCapacityAction AcceptCapacityState::next_action() noexcept {
     }
 
     accept_pending_ = true;
-    if (paused_) {
+    if (paused_)
+    {
         paused_ = false;
         return AcceptCapacityAction::resume_and_start;
     }
     return AcceptCapacityAction::start_accept;
 }
 
-void AcceptCapacityState::accept_completed() noexcept { accept_pending_ = false; }
+void AcceptCapacityState::accept_completed() noexcept
+{
+    accept_pending_ = false;
+}
 
-void AcceptCapacityState::retry_scheduled() noexcept { retry_pending_ = true; }
+void AcceptCapacityState::retry_scheduled() noexcept
+{
+    retry_pending_ = true;
+}
 
-void AcceptCapacityState::retry_completed() noexcept { retry_pending_ = false; }
+void AcceptCapacityState::retry_completed() noexcept
+{
+    retry_pending_ = false;
+}
 
-void AcceptCapacityState::session_started() noexcept { ++active_connections_; }
+void AcceptCapacityState::session_started() noexcept
+{
+    ++active_connections_;
+}
 
-void AcceptCapacityState::session_finished() noexcept {
-    if (active_connections_ > 0) {
+void AcceptCapacityState::session_finished() noexcept
+{
+    if (active_connections_ > 0)
+    {
         --active_connections_;
     }
 }
 
-void AcceptCapacityState::stop() noexcept { stopped_ = true; }
+void AcceptCapacityState::stop() noexcept
+{
+    stopped_ = true;
+}
 
-std::size_t AcceptCapacityState::active_connections() const noexcept { return active_connections_; }
+std::size_t AcceptCapacityState::active_connections() const noexcept
+{
+    return active_connections_;
+}
 
-std::size_t AcceptCapacityState::max_connections() const noexcept { return max_connections_; }
+std::size_t AcceptCapacityState::max_connections() const noexcept
+{
+    return max_connections_;
+}
 
 ProxyPermit::ProxyPermit(std::shared_ptr<ProxyAdmissionState> state) noexcept
-    : state_(std::move(state)) {}
+    : state_(std::move(state))
+{
+}
 
 std::optional<ProxyPermit> ProxyPermit::try_acquire(
-    std::shared_ptr<ProxyAdmissionState> state) noexcept {
-    if (!state || state->active_proxies_ >= state->max_proxies_) {
+    std::shared_ptr<ProxyAdmissionState> state) noexcept
+{
+    if (!state || state->active_proxies_ >= state->max_proxies_)
+    {
         return std::nullopt;
     }
     ++state->active_proxies_;
     return ProxyPermit{std::move(state)};
 }
 
-ProxyPermit::~ProxyPermit() { release(); }
+ProxyPermit::~ProxyPermit()
+{
+    release();
+}
 
-ProxyPermit::ProxyPermit(ProxyPermit&& other) noexcept : state_(std::move(other.state_)) {}
+ProxyPermit::ProxyPermit(ProxyPermit&& other) noexcept : state_(std::move(other.state_))
+{
+}
 
-ProxyPermit& ProxyPermit::operator=(ProxyPermit&& other) noexcept {
-    if (this != &other) {
+ProxyPermit& ProxyPermit::operator=(ProxyPermit&& other) noexcept
+{
+    if (this != &other)
+    {
         release();
         state_ = std::move(other.state_);
     }
     return *this;
 }
 
-void ProxyPermit::release() noexcept {
-    if (!state_) {
+void ProxyPermit::release() noexcept
+{
+    if (!state_)
+    {
         return;
     }
     auto state = std::move(state_);
     state->release();
 }
 
-bool ProxyPermit::owns_capacity() const noexcept { return state_ != nullptr; }
+bool ProxyPermit::owns_capacity() const noexcept
+{
+    return state_ != nullptr;
+}
 
 ProxyAdmissionState::ProxyAdmissionState(std::size_t max_proxies) noexcept
-    : max_proxies_(max_proxies) {}
+    : max_proxies_(max_proxies)
+{
+}
 
-std::size_t ProxyAdmissionState::active_proxies() const noexcept { return active_proxies_; }
+std::size_t ProxyAdmissionState::active_proxies() const noexcept
+{
+    return active_proxies_;
+}
 
-std::size_t ProxyAdmissionState::max_proxies() const noexcept { return max_proxies_; }
+std::size_t ProxyAdmissionState::max_proxies() const noexcept
+{
+    return max_proxies_;
+}
 
-void ProxyAdmissionState::release() noexcept {
-    if (active_proxies_ > 0) {
+void ProxyAdmissionState::release() noexcept
+{
+    if (active_proxies_ > 0)
+    {
         --active_proxies_;
     }
 }
 
 }  // namespace detail
 
-namespace {
+namespace
+{
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -239,13 +327,15 @@ constexpr std::size_t max_requests_per_connection = 100;
 constexpr auto request_timeout = std::chrono::seconds{10};
 constexpr auto accept_retry_delay = std::chrono::milliseconds{100};
 
-[[nodiscard]] bool is_expected_socket_cleanup_error(
-    const boost::system::error_code& error) noexcept {
+[[nodiscard]] bool is_expected_socket_cleanup_error(const boost::system::error_code& error) noexcept
+{
     return !error || error == asio::error::not_connected || error == asio::error::bad_descriptor;
 }
 
-[[nodiscard]] std::string_view proxy_method_name(http::verb method) noexcept {
-    switch (method) {
+[[nodiscard]] std::string_view proxy_method_name(http::verb method) noexcept
+{
+    switch (method)
+    {
         case http::verb::get:
             return "GET";
         case http::verb::post:
@@ -259,14 +349,17 @@ constexpr auto accept_retry_delay = std::chrono::milliseconds{100};
     }
 }
 
-void write_fallback_diagnostic(const char* event, int error_code) noexcept {
+void write_fallback_diagnostic(const char* event, int error_code) noexcept
+{
     if (std::fprintf(stderr, R"({"level":"error","payload":{"event":"%s","error_code":%d}}%c)",
-                     event, error_code, 10) < 0) {
+                     event, error_code, 10) < 0)
+    {
         std::clearerr(stderr);
     }
 }
 
-class HttpSession : public std::enable_shared_from_this<HttpSession> {
+class HttpSession : public std::enable_shared_from_this<HttpSession>
+{
    public:
     using CloseCallback = std::function<void(HttpSession*)>;
 
@@ -278,14 +371,18 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
           logger_(logger),
           proxy_admission_(std::move(proxy_admission)),
           buffer_budget_(std::move(buffer_budget)),
-          on_close_(std::move(on_close)) {
-        if (!proxy_admission_) {
+          on_close_(std::move(on_close))
+    {
+        if (!proxy_admission_)
+        {
             throw std::invalid_argument("proxy admission state must not be empty");
         }
-        if (!buffer_budget_) {
+        if (!buffer_budget_)
+        {
             throw std::invalid_argument("buffer budget must not be empty");
         }
-        if (!on_close_) {
+        if (!on_close_)
+        {
             throw std::invalid_argument("session close callback must not be empty");
         }
         boost::system::error_code error;
@@ -293,21 +390,28 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         remote_address_ = error ? "unknown" : endpoint.address().to_string();
     }
 
-    void start() { read_request(); }
+    void start()
+    {
+        read_request();
+    }
 
 #ifdef APIGATE_HTTP_SESSION_TESTING
-    [[nodiscard]] detail::SessionWriteSnapshot write_snapshot() const noexcept {
+    [[nodiscard]] detail::SessionWriteSnapshot write_snapshot() const noexcept
+    {
         return {!finished_ && phase_ == detail::SessionPhase::writing && response_.has_value(),
                 response_ ? response_->body().size() : 0};
     }
 #endif
 
-    void begin_drain() noexcept {
-        if (draining_ || finished_) {
+    void begin_drain() noexcept
+    {
+        if (draining_ || finished_)
+        {
             return;
         }
         draining_ = true;
-        switch (detail::classify_session_drain(phase_)) {
+        switch (detail::classify_session_drain(phase_))
+        {
             case detail::SessionDrainDisposition::close_immediately:
                 stop();
                 return;
@@ -317,38 +421,46 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         }
     }
 
-    void stop() noexcept {
-        if (finished_) {
+    void stop() noexcept
+    {
+        if (finished_)
+        {
             return;
         }
         stopping_ = true;
-        if (proxy_exchange_) {
+        if (proxy_exchange_)
+        {
             proxy_exchange_->cancel();
             proxy_exchange_.reset();
         }
         proxy_permit_.reset();
         boost::system::error_code operation_error;
         const auto cancel_error = stream_.socket().cancel(operation_error);
-        if (!is_expected_socket_cleanup_error(cancel_error)) {
+        if (!is_expected_socket_cleanup_error(cancel_error))
+        {
             write_fallback_diagnostic("http_session_cancel_failed", cancel_error.value());
         }
         operation_error.clear();
         const auto shutdown_error =
             stream_.socket().shutdown(tcp::socket::shutdown_both, operation_error);
-        if (!is_expected_socket_cleanup_error(shutdown_error)) {
+        if (!is_expected_socket_cleanup_error(shutdown_error))
+        {
             write_fallback_diagnostic("http_session_shutdown_failed", shutdown_error.value());
         }
         operation_error.clear();
         const auto close_error = stream_.socket().close(operation_error);
-        if (!is_expected_socket_cleanup_error(close_error)) {
+        if (!is_expected_socket_cleanup_error(close_error))
+        {
             write_fallback_diagnostic("http_session_close_failed", close_error.value());
         }
         finish();
     }
 
    private:
-    void read_request() {
-        if (stopping_ || draining_) {
+    void read_request()
+    {
+        if (stopping_ || draining_)
+        {
             close_socket();
             return;
         }
@@ -360,23 +472,31 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         // 100-continue receives the promised 417 without sending its body.
         parser_->body_limit(std::numeric_limits<std::uint64_t>::max());
         stream_.expires_after(request_timeout);
-        http::async_read_header(
-            stream_, buffer_, *parser_,
-            [self = shared_from_this()](const boost::system::error_code& error,
-                                        std::size_t) noexcept {
-                self->run_handler([self, &error] { self->on_read_header(error); });
-            });
+        http::async_read_header(stream_, buffer_, *parser_,
+                                [self = shared_from_this()](const boost::system::error_code& error,
+                                                            std::size_t) noexcept
+                                {
+                                    self->run_handler(
+                                        [self, &error]
+                                        {
+                                            self->on_read_header(error);
+                                        });
+                                });
     }
 
-    void on_read_header(const boost::system::error_code& error) {
-        if (finished_) {
+    void on_read_header(const boost::system::error_code& error)
+    {
+        if (finished_)
+        {
             return;
         }
-        if (error) {
+        if (error)
+        {
             handle_read_error(error);
             return;
         }
-        if (!parser_.has_value()) {
+        if (!parser_.has_value())
+        {
             logger_.error("http_parser_state_invalid");
             close_socket();
             return;
@@ -384,15 +504,18 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
 
         const auto& request = parser_->get();
         const auto [expect_begin, expect_end] = request.equal_range(http::field::expect);
-        for (auto expect = expect_begin; expect != expect_end; ++expect) {
-            if (!expect->value().empty()) {
+        for (auto expect = expect_begin; expect != expect_end; ++expect)
+        {
+            if (!expect->value().empty())
+            {
                 write_protocol_error(http::status::expectation_failed, "expectation_failed",
                                      "Expect is not supported");
                 return;
             }
         }
         const auto content_length = parser_->content_length();
-        if (content_length && *content_length > max_body_bytes) {
+        if (content_length && *content_length > max_body_bytes)
+        {
             write_protocol_error(http::status::payload_too_large, "payload_too_large",
                                  "request body is too large");
             return;
@@ -403,42 +526,53 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
             content_length ? std::optional<std::uint64_t>{*content_length} : std::nullopt;
         const auto reservation = detail::plan_body_reservation(planned_content_length,
                                                                parser_->is_done(), max_body_bytes);
-        if (reservation.kind == detail::BodyReservationKind::none) {
+        if (reservation.kind == detail::BodyReservationKind::none)
+        {
             process_request();
             return;
         }
-        if (reservation.kind == detail::BodyReservationKind::too_large) {
+        if (reservation.kind == detail::BodyReservationKind::too_large)
+        {
             write_protocol_error(http::status::payload_too_large, "payload_too_large",
                                  "request body is too large");
             return;
         }
 
         auto permit = buffer_budget_->try_acquire(reservation.bytes);
-        if (!permit) {
+        if (!permit)
+        {
             reject_buffer_budget(request, reservation.bytes);
             return;
         }
         request_body_permit_ = std::make_shared<detail::BufferBudgetPermit>(std::move(*permit));
 
-        http::async_read(
-            stream_, buffer_, *parser_,
-            [self = shared_from_this()](const boost::system::error_code& body_error,
-                                        std::size_t) noexcept {
-                self->run_handler([self, &body_error] { self->on_read_body(body_error); });
-            });
+        http::async_read(stream_, buffer_, *parser_,
+                         [self = shared_from_this()](const boost::system::error_code& body_error,
+                                                     std::size_t) noexcept
+                         {
+                             self->run_handler(
+                                 [self, &body_error]
+                                 {
+                                     self->on_read_body(body_error);
+                                 });
+                         });
     }
 
-    void on_read_body(const boost::system::error_code& error) {
-        if (finished_) {
+    void on_read_body(const boost::system::error_code& error)
+    {
+        if (finished_)
+        {
             return;
         }
-        if (error) {
+        if (error)
+        {
             handle_read_error(error);
             return;
         }
         if (!parser_.has_value() || !request_body_permit_ ||
             !request_body_permit_->shrink_to(
-                static_cast<std::uint64_t>(parser_->get().body().size()))) {
+                static_cast<std::uint64_t>(parser_->get().body().size())))
+        {
             write_fallback_diagnostic("http_request_budget_shrink_failed", 0);
             close_socket();
             return;
@@ -446,21 +580,25 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         process_request();
     }
 
-    void process_request() {
-        if (!parser_.has_value()) {
+    void process_request()
+    {
+        if (!parser_.has_value())
+        {
             logger_.error("http_parser_state_invalid");
             close_socket();
             return;
         }
         ++requests_served_;
         const auto& request = parser_->get();
-        if (const auto upstream = select_http_upstream(config_, request)) {
+        if (const auto upstream = select_http_upstream(config_, request))
+        {
             phase_ = detail::SessionPhase::proxying;
             start_proxy_request(request, *upstream);
             return;
         }
         auto response = handle_http_request(config_, request);
-        if (requests_served_ >= max_requests_per_connection) {
+        if (requests_served_ >= max_requests_per_connection)
+        {
             response.keep_alive(false);
         }
 
@@ -471,22 +609,27 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         write_response(std::move(response));
     }
 
-    void handle_read_error(const boost::system::error_code& error) {
-        if (error == http::error::end_of_stream || error == asio::error::operation_aborted) {
+    void handle_read_error(const boost::system::error_code& error)
+    {
+        if (error == http::error::end_of_stream || error == asio::error::operation_aborted)
+        {
             close_socket();
             return;
         }
-        if (error == beast::error::timeout) {
+        if (error == beast::error::timeout)
+        {
             logger_.warn("http_request_rejected", {{"reason", "read_timeout"}});
             close_socket();
             return;
         }
-        if (error == http::error::body_limit) {
+        if (error == http::error::body_limit)
+        {
             write_protocol_error(http::status::payload_too_large, "payload_too_large",
                                  "request body is too large");
             return;
         }
-        if (error == http::error::header_limit) {
+        if (error == http::error::header_limit)
+        {
             write_protocol_error(http::status::request_header_fields_too_large, "headers_too_large",
                                  "request headers are too large");
             return;
@@ -496,8 +639,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         write_protocol_error(http::status::bad_request, "bad_request", "malformed HTTP request");
     }
 
-    void write_protocol_error(http::status status, std::string_view code,
-                              std::string_view message) {
+    void write_protocol_error(http::status status, std::string_view code, std::string_view message)
+    {
         HttpResponse response{status, 11};
         response.set(http::field::server, "ApiGate");
         response.set(http::field::content_type, "application/json");
@@ -513,7 +656,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         write_response(std::move(response));
     }
 
-    void reject_buffer_budget(const HttpRequest& request, std::uint64_t requested_bytes) {
+    void reject_buffer_budget(const HttpRequest& request, std::uint64_t requested_bytes)
+    {
         auto response =
             make_gateway_error_response(request, GatewayFailure::buffer_capacity_exhausted);
         response.keep_alive(false);
@@ -523,16 +667,19 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         write_response(std::move(response));
     }
 
-    void start_proxy_request(const HttpRequest& request,
-                             const SelectedUpstream& upstream) noexcept {
+    void start_proxy_request(const HttpRequest& request, const SelectedUpstream& upstream) noexcept
+    {
         std::shared_ptr<HttpProxyExchange> exchange;
         const auto method = request.method();
-        try {
+        try
+        {
             proxy_permit_ = detail::ProxyPermit::try_acquire(proxy_admission_);
-            if (!proxy_permit_) {
+            if (!proxy_permit_)
+            {
                 auto response =
                     make_gateway_error_response(request, GatewayFailure::gateway_overloaded);
-                if (requests_served_ >= max_requests_per_connection) {
+                if (requests_served_ >= max_requests_per_connection)
+                {
                     response.keep_alive(false);
                 }
                 log_proxy_capacity_rejection(response.result_int());
@@ -542,13 +689,17 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
             }
             exchange = std::make_shared<HttpProxyExchange>(
                 stream_.get_executor(), upstream, request, buffer_budget_, request_body_permit_,
-                [weak_self = weak_from_this(), method](ProxyResult result) noexcept {
-                    if (const auto self = weak_self.lock()) {
+                [weak_self = weak_from_this(), method](ProxyResult result) noexcept
+                {
+                    if (const auto self = weak_self.lock())
+                    {
                         self->on_proxy_complete(method, std::move(result));
                     }
                 },
-                [weak_self = weak_from_this()]() noexcept {
-                    if (const auto self = weak_self.lock()) {
+                [weak_self = weak_from_this()]() noexcept
+                {
+                    if (const auto self = weak_self.lock())
+                    {
                         self->on_proxy_aborted();
                     }
                 });
@@ -556,109 +707,143 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
             exchange->start();
             parser_.reset();
             request_body_permit_.reset();
-        } catch (...) {
-            if (exchange) {
+        }
+        catch (...)
+        {
+            if (exchange)
+            {
                 exchange->cancel();
             }
             proxy_exchange_.reset();
             proxy_permit_.reset();
-            try {
+            try
+            {
                 auto response = make_gateway_error_response(request, GatewayFailure::bad_gateway);
                 log_proxy_failure(ProxyFailure{ProxyFailureStage::connect, 0},
                                   response.result_int());
                 log_request_completed(proxy_method_name(method), "proxy", response.result_int());
                 write_response(std::move(response));
-            } catch (...) {
+            }
+            catch (...)
+            {
                 write_fallback_diagnostic("http_proxy_start_failed", 0);
                 close_socket();
             }
         }
     }
 
-    void on_proxy_complete(http::verb method, ProxyResult result) noexcept {
-        try {
+    void on_proxy_complete(http::verb method, ProxyResult result) noexcept
+    {
+        try
+        {
             proxy_exchange_.reset();
             proxy_permit_.reset();
-            if (finished_ || stopping_) {
+            if (finished_ || stopping_)
+            {
                 return;
             }
-            if (requests_served_ >= max_requests_per_connection) {
+            if (requests_served_ >= max_requests_per_connection)
+            {
                 result.response.keep_alive(false);
             }
-            if (result.failure) {
+            if (result.failure)
+            {
                 log_proxy_failure(*result.failure, result.response.result_int());
             }
-            if (result.buffer_budget_rejected_bytes) {
+            if (result.buffer_budget_rejected_bytes)
+            {
                 log_buffer_budget_rejection("response", *result.buffer_budget_rejected_bytes,
                                             result.response.result_int());
             }
             log_request_completed(proxy_method_name(method), "proxy", result.response.result_int());
             write_response(std::move(result.response), std::move(result.body_permit));
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic("http_proxy_completion_failed", 0);
             close_socket();
         }
     }
 
-    void on_proxy_aborted() noexcept {
+    void on_proxy_aborted() noexcept
+    {
         proxy_exchange_.reset();
         proxy_permit_.reset();
-        if (finished_ || stopping_) {
+        if (finished_ || stopping_)
+        {
             return;
         }
         close_socket();
     }
 
-    void log_proxy_failure(const ProxyFailure& failure, unsigned int status) noexcept {
-        try {
+    void log_proxy_failure(const ProxyFailure& failure, unsigned int status) noexcept
+    {
+        try
+        {
             logger_.warn("http_upstream_request_failed", {{"stage", to_string(failure.stage)},
                                                           {"error_code", failure.error_code},
                                                           {"status", status}});
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic("http_upstream_failure_log_failed", failure.error_code);
         }
     }
 
-    void log_proxy_capacity_rejection(unsigned int status) noexcept {
-        try {
+    void log_proxy_capacity_rejection(unsigned int status) noexcept
+    {
+        try
+        {
             logger_.warn("http_proxy_rejected_capacity",
                          {{"active_proxies", proxy_admission_->active_proxies()},
                           {"max_proxies", proxy_admission_->max_proxies()},
                           {"status", status}});
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic("http_proxy_capacity_log_failed", 0);
         }
     }
 
     void log_buffer_budget_rejection(std::string_view direction, std::uint64_t requested_bytes,
-                                     unsigned int status) noexcept {
-        try {
+                                     unsigned int status) noexcept
+    {
+        try
+        {
             logger_.warn("http_buffer_budget_rejected",
                          {{"direction", direction},
                           {"requested_bytes", requested_bytes},
                           {"active_bytes", buffer_budget_->current_bytes()},
                           {"max_bytes", buffer_budget_->max_bytes()},
                           {"status", status}});
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic("http_buffer_budget_log_failed", 0);
         }
     }
 
     void log_request_completed(std::string_view method, std::string_view route,
-                               unsigned int status) noexcept {
-        try {
+                               unsigned int status) noexcept
+    {
+        try
+        {
             logger_.info("http_request_completed", {{"method", method},
                                                     {"route", route},
                                                     {"status", status},
                                                     {"remote_address", remote_address_}});
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic("http_request_log_failed", 0);
         }
     }
 
-    void write_response(HttpResponse response, detail::BufferBudgetPermit body_permit = {}) {
+    void write_response(HttpResponse response, detail::BufferBudgetPermit body_permit = {})
+    {
         phase_ = detail::SessionPhase::writing;
-        if (draining_) {
+        if (draining_)
+        {
             response.keep_alive(false);
         }
         const bool close_after_write = response.need_eof();
@@ -667,25 +852,34 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         stream_.expires_after(request_timeout);
         http::async_write(stream_, *response_,
                           [self = shared_from_this(), close_after_write](
-                              const boost::system::error_code& error, std::size_t) noexcept {
-                              self->run_handler([self, close_after_write, &error] {
-                                  self->on_write(error, close_after_write);
-                              });
+                              const boost::system::error_code& error, std::size_t) noexcept
+                          {
+                              self->run_handler(
+                                  [self, close_after_write, &error]
+                                  {
+                                      self->on_write(error, close_after_write);
+                                  });
                           });
     }
 
     template <typename HandlerAction>
-    void run_handler(HandlerAction&& action) noexcept {
-        try {
+    void run_handler(HandlerAction&& action) noexcept
+    {
+        try
+        {
             std::forward<HandlerAction>(action)();
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic("http_session_handler_exception", 0);
             close_socket();
         }
     }
 
-    void on_write(const boost::system::error_code& error, bool close_after_write) {
-        if (finished_) {
+    void on_write(const boost::system::error_code& error, bool close_after_write)
+    {
+        if (finished_)
+        {
             return;
         }
         response_.reset();
@@ -693,11 +887,15 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         parser_.reset();
         request_body_permit_.reset();
 
-        switch (detail::classify_http_write_result(error, stopping_)) {
+        switch (detail::classify_http_write_result(error, stopping_))
+        {
             case detail::HttpWriteDisposition::success:
-                if (close_after_write || draining_) {
+                if (close_after_write || draining_)
+                {
                     close_socket();
-                } else {
+                }
+                else
+                {
                     read_request();
                 }
                 return;
@@ -706,9 +904,12 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
                 close_socket();
                 return;
             case detail::HttpWriteDisposition::unexpected_error:
-                try {
+                try
+                {
                     logger_.error("http_response_write_failed", {{"error_code", error.value()}});
-                } catch (...) {
+                }
+                catch (...)
+                {
                     write_fallback_diagnostic("http_response_write_log_failed", error.value());
                 }
                 close_socket();
@@ -716,26 +917,32 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
         }
     }
 
-    void close_socket() noexcept {
-        if (finished_) {
+    void close_socket() noexcept
+    {
+        if (finished_)
+        {
             return;
         }
         boost::system::error_code operation_error;
         const auto shutdown_error =
             stream_.socket().shutdown(tcp::socket::shutdown_send, operation_error);
-        if (!is_expected_socket_cleanup_error(shutdown_error)) {
+        if (!is_expected_socket_cleanup_error(shutdown_error))
+        {
             write_fallback_diagnostic("http_session_shutdown_failed", shutdown_error.value());
         }
         operation_error.clear();
         const auto close_error = stream_.socket().close(operation_error);
-        if (!is_expected_socket_cleanup_error(close_error)) {
+        if (!is_expected_socket_cleanup_error(close_error))
+        {
             write_fallback_diagnostic("http_session_close_failed", close_error.value());
         }
         finish();
     }
 
-    void finish() noexcept {
-        if (finished_) {
+    void finish() noexcept
+    {
+        if (finished_)
+        {
             return;
         }
         finished_ = true;
@@ -770,16 +977,28 @@ class HttpSession : public std::enable_shared_from_this<HttpSession> {
 detail::SessionWriteProbe detail::start_session_write_probe(
     tcp::socket socket, const AppConfig& config, StructuredLogger& logger,
     std::shared_ptr<ProxyAdmissionState> admission, std::shared_ptr<BufferBudgetState> budget,
-    std::function<void()> on_close) {
-    auto session = std::make_shared<HttpSession>(
-        std::move(socket), config, logger, std::move(admission), std::move(budget),
-        [on_close = std::move(on_close)](HttpSession*) { on_close(); });
+    std::function<void()> on_close)
+{
+    auto session = std::make_shared<HttpSession>(std::move(socket), config, logger,
+                                                 std::move(admission), std::move(budget),
+                                                 [on_close = std::move(on_close)](HttpSession*)
+                                                 {
+                                                     on_close();
+                                                 });
     session->start();
-    return {[session] { return session->write_snapshot(); }, [session] { session->stop(); }};
+    return {[session]
+            {
+                return session->write_snapshot();
+            },
+            [session]
+            {
+                session->stop();
+            }};
 }
 #endif
 
-class HttpServer::Impl {
+class HttpServer::Impl
+{
    public:
     Impl(asio::io_context& io_context, const AppConfig& config, StructuredLogger& logger,
          std::function<void()> on_runtime_failure, std::function<void()> on_drain_complete)
@@ -793,19 +1012,27 @@ class HttpServer::Impl {
               std::make_shared<detail::ProxyAdmissionState>(config.max_concurrent_proxies)),
           buffer_budget_(std::make_shared<detail::BufferBudgetState>(config.max_in_flight_bytes)),
           on_runtime_failure_(std::move(on_runtime_failure)),
-          on_drain_complete_(std::move(on_drain_complete)) {
-        if (!on_runtime_failure_) {
+          on_drain_complete_(std::move(on_drain_complete))
+    {
+        if (!on_runtime_failure_)
+        {
             throw std::invalid_argument("runtime failure callback must not be empty");
         }
-        if (!on_drain_complete_) {
+        if (!on_drain_complete_)
+        {
             throw std::invalid_argument("drain completion callback must not be empty");
         }
     }
 
-    ~Impl() { stop(); }
+    ~Impl()
+    {
+        stop();
+    }
 
-    void start() {
-        if (started_) {
+    void start()
+    {
+        if (started_)
+        {
             return;
         }
 
@@ -823,29 +1050,39 @@ class HttpServer::Impl {
         drive_accept();
     }
 
-    void begin_drain() noexcept {
-        try {
+    void begin_drain() noexcept
+    {
+        try
+        {
             begin_drain_impl();
-        } catch (const boost::system::system_error& error) {
+        }
+        catch (const boost::system::system_error& error)
+        {
             fail_runtime("shutdown_drain_start_failed", error.code().value());
-        } catch (...) {
+        }
+        catch (...)
+        {
             fail_runtime("shutdown_drain_start_failed", 0);
         }
     }
 
-    void force_stop_drain(int signal_number) noexcept {
-        if (drain_state_.phase() != detail::ServerDrainPhase::draining) {
+    void force_stop_drain(int signal_number) noexcept
+    {
+        if (drain_state_.phase() != detail::ServerDrainPhase::draining)
+        {
             return;
         }
         const auto active_sessions = drain_state_.active_sessions();
         const auto result = drain_state_.begin_force_stop();
-        if (result == detail::DrainStartResult::unchanged) {
+        if (result == detail::DrainStartResult::unchanged)
+        {
             return;
         }
         drain_forced_ = true;
         safe_info(
             "shutdown_force_requested",
-            [signal_number, active_sessions] {
+            [signal_number, active_sessions]
+            {
                 return nlohmann::json{{"signal", signal_number},
                                       {"active_sessions", active_sessions}};
             },
@@ -853,15 +1090,18 @@ class HttpServer::Impl {
         stop_accepting();
         cancel_drain_timer();
         stop_all_sessions();
-        if (result == detail::DrainStartResult::completed) {
+        if (result == detail::DrainStartResult::completed)
+        {
             finish_drain();
         }
     }
 
-    void stop() noexcept {
+    void stop() noexcept
+    {
         drain_completion_enabled_ = false;
         const auto result = drain_state_.begin_force_stop();
-        if (result == detail::DrainStartResult::unchanged) {
+        if (result == detail::DrainStartResult::unchanged)
+        {
             return;
         }
         stop_accepting();
@@ -869,48 +1109,63 @@ class HttpServer::Impl {
         stop_all_sessions();
     }
 
-    [[nodiscard]] std::uint16_t bound_port() const noexcept { return bound_port_; }
+    [[nodiscard]] std::uint16_t bound_port() const noexcept
+    {
+        return bound_port_;
+    }
 
    private:
-    void begin_drain_impl() {
+    void begin_drain_impl()
+    {
         const auto result = drain_state_.begin_drain();
-        if (result == detail::DrainStartResult::unchanged) {
+        if (result == detail::DrainStartResult::unchanged)
+        {
             return;
         }
 
         drain_completion_enabled_ = true;
         safe_info(
             "shutdown_drain_started",
-            [this] {
+            [this]
+            {
                 return nlohmann::json{{"active_sessions", drain_state_.active_sessions()},
                                       {"grace_ms", config_.shutdown_grace_ms}};
             },
             "shutdown_drain_start_log_failed");
         stop_accepting();
 
-        if (result == detail::DrainStartResult::completed) {
+        if (result == detail::DrainStartResult::completed)
+        {
             finish_drain();
             return;
         }
 
         const auto sessions = session_snapshot();
-        for (const auto& session : sessions) {
+        for (const auto& session : sessions)
+        {
             session->begin_drain();
         }
-        if (drain_state_.phase() != detail::ServerDrainPhase::draining) {
+        if (drain_state_.phase() != detail::ServerDrainPhase::draining)
+        {
             return;
         }
 
         drain_timer_.expires_after(std::chrono::milliseconds{config_.shutdown_grace_ms});
         drain_timer_.async_wait(
-            [this](const boost::system::error_code& error) noexcept { on_drain_timer(error); });
+            [this](const boost::system::error_code& error) noexcept
+            {
+                on_drain_timer(error);
+            });
     }
 
-    void drive_accept() {
-        if (drain_state_.phase() != detail::ServerDrainPhase::running) {
+    void drive_accept()
+    {
+        if (drain_state_.phase() != detail::ServerDrainPhase::running)
+        {
             return;
         }
-        switch (accept_capacity_.next_action()) {
+        switch (accept_capacity_.next_action())
+        {
             case detail::AcceptCapacityAction::none:
                 return;
             case detail::AcceptCapacityAction::pause:
@@ -924,36 +1179,49 @@ class HttpServer::Impl {
         }
 
         acceptor_.async_accept(
-            [this](const boost::system::error_code& error, tcp::socket socket) noexcept {
-                try {
+            [this](const boost::system::error_code& error, tcp::socket socket) noexcept
+            {
+                try
+                {
                     on_accept(error, std::move(socket));
-                } catch (const boost::system::system_error& exception) {
+                }
+                catch (const boost::system::system_error& exception)
+                {
                     fail_runtime("http_accept_handler_failed", exception.code().value());
-                } catch (...) {
+                }
+                catch (...)
+                {
                     fail_runtime("http_accept_handler_failed", 0);
                 }
             });
     }
 
-    void on_accept(const boost::system::error_code& error, tcp::socket socket) {
+    void on_accept(const boost::system::error_code& error, tcp::socket socket)
+    {
         accept_capacity_.accept_completed();
-        if (drain_state_.phase() != detail::ServerDrainPhase::running) {
+        if (drain_state_.phase() != detail::ServerDrainPhase::running)
+        {
             return;
         }
-        if (error) {
+        if (error)
+        {
             logger_.error("http_accept_failed", {{"error_code", error.value()}});
             accept_retry_timer_.expires_after(accept_retry_delay);
             accept_capacity_.retry_scheduled();
             accept_retry_timer_.async_wait(
-                [this](const boost::system::error_code& timer_error) noexcept {
+                [this](const boost::system::error_code& timer_error) noexcept
+                {
                     on_accept_retry_timer(timer_error);
                 });
             return;
         }
 
-        auto session = std::make_shared<HttpSession>(
-            std::move(socket), config_, logger_, proxy_admission_, buffer_budget_,
-            [this](HttpSession* closed_session) { remove_session(closed_session); });
+        auto session = std::make_shared<HttpSession>(std::move(socket), config_, logger_,
+                                                     proxy_admission_, buffer_budget_,
+                                                     [this](HttpSession* closed_session)
+                                                     {
+                                                         remove_session(closed_session);
+                                                     });
         sessions_.insert(session);
         accept_capacity_.session_started();
         drain_state_.session_started();
@@ -961,16 +1229,23 @@ class HttpServer::Impl {
         drive_accept();
     }
 
-    void on_accept_retry_timer(const boost::system::error_code& error) noexcept {
+    void on_accept_retry_timer(const boost::system::error_code& error) noexcept
+    {
         accept_capacity_.retry_completed();
         const bool accepting_stopped = drain_state_.phase() != detail::ServerDrainPhase::running;
-        switch (detail::classify_accept_retry_completion(error, accepting_stopped)) {
+        switch (detail::classify_accept_retry_completion(error, accepting_stopped))
+        {
             case detail::AcceptRetryDisposition::retry:
-                try {
+                try
+                {
                     drive_accept();
-                } catch (const boost::system::system_error& exception) {
+                }
+                catch (const boost::system::system_error& exception)
+                {
                     fail_runtime("http_accept_retry_resume_failed", exception.code().value());
-                } catch (...) {
+                }
+                catch (...)
+                {
                     fail_runtime("http_accept_retry_resume_failed", 0);
                 }
                 return;
@@ -982,34 +1257,47 @@ class HttpServer::Impl {
         }
     }
 
-    void log_accept_capacity(std::string_view event) noexcept {
-        try {
+    void log_accept_capacity(std::string_view event) noexcept
+    {
+        try
+        {
             logger_.info(event, {{"active_connections", accept_capacity_.active_connections()},
                                  {"max_connections", accept_capacity_.max_connections()}});
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic("http_accept_capacity_log_failed", 0);
         }
     }
 
-    void fail_accept_retry(const boost::system::error_code& error) {
+    void fail_accept_retry(const boost::system::error_code& error)
+    {
         fail_runtime("http_accept_retry_failed", error.value());
     }
 
-    void remove_session(HttpSession* closed_session) noexcept {
-        for (auto iterator = sessions_.begin(); iterator != sessions_.end(); ++iterator) {
-            if (iterator->get() == closed_session) {
+    void remove_session(HttpSession* closed_session) noexcept
+    {
+        for (auto iterator = sessions_.begin(); iterator != sessions_.end(); ++iterator)
+        {
+            if (iterator->get() == closed_session)
+            {
                 sessions_.erase(iterator);
                 accept_capacity_.session_finished();
                 const bool drain_completed = drain_state_.session_finished();
-                if (drain_completed) {
-                    if (drain_completion_enabled_) {
+                if (drain_completed)
+                {
+                    if (drain_completion_enabled_)
+                    {
                         finish_drain();
                     }
                     return;
                 }
-                try {
+                try
+                {
                     drive_accept();
-                } catch (...) {
+                }
+                catch (...)
+                {
                     fail_runtime("http_accept_resume_failed", 0);
                 }
                 return;
@@ -1017,50 +1305,65 @@ class HttpServer::Impl {
         }
     }
 
-    [[nodiscard]] std::vector<std::shared_ptr<HttpSession>> session_snapshot() const {
+    [[nodiscard]] std::vector<std::shared_ptr<HttpSession>> session_snapshot() const
+    {
         return {sessions_.begin(), sessions_.end()};
     }
 
-    void stop_accepting() noexcept {
+    void stop_accepting() noexcept
+    {
         accept_capacity_.stop();
-        try {
+        try
+        {
             const auto cancelled_operations = accept_retry_timer_.cancel();
-            if (cancelled_operations > 1U) {
+            if (cancelled_operations > 1U)
+            {
                 write_fallback_diagnostic("http_accept_timer_invalid_cancel_count",
                                           static_cast<int>(cancelled_operations));
             }
-        } catch (const boost::system::system_error& error) {
+        }
+        catch (const boost::system::system_error& error)
+        {
             write_fallback_diagnostic("http_accept_timer_cancel_failed", error.code().value());
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic("http_accept_timer_cancel_failed", 0);
         }
 
-        if (acceptor_.is_open()) {
+        if (acceptor_.is_open())
+        {
             boost::system::error_code operation_error;
             const auto cancel_error = acceptor_.cancel(operation_error);
-            if (cancel_error) {
+            if (cancel_error)
+            {
                 write_fallback_diagnostic("http_acceptor_cancel_failed", cancel_error.value());
             }
             operation_error.clear();
             const auto close_error = acceptor_.close(operation_error);
-            if (close_error) {
+            if (close_error)
+            {
                 write_fallback_diagnostic("http_acceptor_close_failed", close_error.value());
             }
         }
 
-        if (started_ && !listener_stop_logged_) {
+        if (started_ && !listener_stop_logged_)
+        {
             listener_stop_logged_ = true;
             safe_info(
                 "http_listener_stopped",
-                [this] {
+                [this]
+                {
                     return nlohmann::json{{"active_sessions", drain_state_.active_sessions()}};
                 },
                 "http_listener_stop_log_failed");
         }
     }
 
-    void on_drain_timer(const boost::system::error_code& error) noexcept {
-        switch (detail::classify_drain_timer_completion(error, drain_state_.phase())) {
+    void on_drain_timer(const boost::system::error_code& error) noexcept
+    {
+        switch (detail::classify_drain_timer_completion(error, drain_state_.phase()))
+        {
             case detail::DrainTimerDisposition::ignored:
                 return;
             case detail::DrainTimerDisposition::timed_out:
@@ -1072,84 +1375,120 @@ class HttpServer::Impl {
         }
     }
 
-    void force_stop_after_timeout() noexcept {
+    void force_stop_after_timeout() noexcept
+    {
         const auto forced_sessions = drain_state_.active_sessions();
         const auto result = drain_state_.begin_force_stop();
-        if (result == detail::DrainStartResult::unchanged) {
+        if (result == detail::DrainStartResult::unchanged)
+        {
             return;
         }
         drain_forced_ = true;
         safe_info(
             "shutdown_drain_timed_out",
-            [forced_sessions] { return nlohmann::json{{"forced_sessions", forced_sessions}}; },
+            [forced_sessions]
+            {
+                return nlohmann::json{{"forced_sessions", forced_sessions}};
+            },
             "shutdown_drain_timeout_log_failed");
         stop_accepting();
         cancel_drain_timer();
         stop_all_sessions();
-        if (result == detail::DrainStartResult::completed) {
+        if (result == detail::DrainStartResult::completed)
+        {
             finish_drain();
         }
     }
 
-    void stop_all_sessions() noexcept {
-        while (!sessions_.empty()) {
+    void stop_all_sessions() noexcept
+    {
+        while (!sessions_.empty())
+        {
             const auto session = *sessions_.begin();
             session->stop();
         }
     }
 
-    void finish_drain() noexcept {
-        if (drain_callback_claimed_ || !drain_completion_enabled_) {
+    void finish_drain() noexcept
+    {
+        if (drain_callback_claimed_ || !drain_completion_enabled_)
+        {
             return;
         }
         drain_callback_claimed_ = true;
         cancel_drain_timer();
-        if (!drain_forced_) {
+        if (!drain_forced_)
+        {
             safe_info(
-                "shutdown_drain_completed", [] { return nlohmann::json{{"active_sessions", 0}}; },
+                "shutdown_drain_completed",
+                []
+                {
+                    return nlohmann::json{{"active_sessions", 0}};
+                },
                 "shutdown_drain_complete_log_failed");
         }
-        try {
+        try
+        {
             on_drain_complete_();
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic("shutdown_drain_callback_failed", 0);
             fail_runtime("shutdown_drain_callback_failed", 0);
         }
     }
 
-    void cancel_drain_timer() noexcept {
-        try {
+    void cancel_drain_timer() noexcept
+    {
+        try
+        {
             static_cast<void>(drain_timer_.cancel());
-        } catch (const boost::system::system_error& error) {
+        }
+        catch (const boost::system::system_error& error)
+        {
             write_fallback_diagnostic("shutdown_drain_timer_cancel_failed", error.code().value());
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic("shutdown_drain_timer_cancel_failed", 0);
         }
     }
 
     template <typename FieldsFactory>
     void safe_info(std::string_view event, FieldsFactory&& make_fields,
-                   const char* fallback_event) noexcept {
-        try {
+                   const char* fallback_event) noexcept
+    {
+        try
+        {
             logger_.info(event, std::forward<FieldsFactory>(make_fields)());
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic(fallback_event, 0);
         }
     }
 
-    void fail_runtime(std::string_view event, int error_code) noexcept {
-        if (!runtime_failure_state_.claim()) {
+    void fail_runtime(std::string_view event, int error_code) noexcept
+    {
+        if (!runtime_failure_state_.claim())
+        {
             return;
         }
-        try {
+        try
+        {
             logger_.critical(event, {{"error_code", error_code}});
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic("http_runtime_failure_log_failed", error_code);
         }
         stop();
-        try {
+        try
+        {
             on_runtime_failure_();
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_fallback_diagnostic("http_runtime_failure_callback_failed", 0);
         }
     }
@@ -1179,20 +1518,35 @@ HttpServer::HttpServer(asio::io_context& io_context, const AppConfig& config,
                        StructuredLogger& logger, std::function<void()> on_runtime_failure,
                        std::function<void()> on_drain_complete)
     : impl_(std::make_unique<Impl>(io_context, config, logger, std::move(on_runtime_failure),
-                                   std::move(on_drain_complete))) {}
+                                   std::move(on_drain_complete)))
+{
+}
 
 HttpServer::~HttpServer() = default;
 
-void HttpServer::start() { impl_->start(); }
+void HttpServer::start()
+{
+    impl_->start();
+}
 
-void HttpServer::begin_drain() noexcept { impl_->begin_drain(); }
+void HttpServer::begin_drain() noexcept
+{
+    impl_->begin_drain();
+}
 
-void HttpServer::force_stop_drain(int signal_number) noexcept {
+void HttpServer::force_stop_drain(int signal_number) noexcept
+{
     impl_->force_stop_drain(signal_number);
 }
 
-void HttpServer::stop() noexcept { impl_->stop(); }
+void HttpServer::stop() noexcept
+{
+    impl_->stop();
+}
 
-std::uint16_t HttpServer::bound_port() const noexcept { return impl_->bound_port(); }
+std::uint16_t HttpServer::bound_port() const noexcept
+{
+    return impl_->bound_port();
+}
 
 }  // namespace apigate

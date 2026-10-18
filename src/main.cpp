@@ -11,37 +11,46 @@
 #include "apigate/logging.hpp"
 #include "apigate/version.hpp"
 
-namespace {
+namespace
+{
 
-enum class Command : std::uint8_t {
+enum class Command : std::uint8_t
+{
     run,
     check_config,
     help,
     version,
 };
 
-[[nodiscard]] Command parse_command_line(int argc, char* argv[]) {
-    if (argc == 1) {
+[[nodiscard]] Command parse_command_line(int argc, char* argv[])
+{
+    if (argc == 1)
+    {
         return Command::run;
     }
-    if (argc != 2) {
+    if (argc != 2)
+    {
         throw std::invalid_argument("expected zero or one command-line option");
     }
 
     const std::string_view argument{argv[1]};
-    if (argument == "--check-config") {
+    if (argument == "--check-config")
+    {
         return Command::check_config;
     }
-    if (argument == "--help" || argument == "-h") {
+    if (argument == "--help" || argument == "-h")
+    {
         return Command::help;
     }
-    if (argument == "--version") {
+    if (argument == "--version")
+    {
         return Command::version;
     }
     throw std::invalid_argument("unsupported command-line option");
 }
 
-void print_help() {
+void print_help()
+{
     std::cout
         << "Usage: api-gate [--check-config | --help | --version]\n"
         << "\nEnvironment variables:\n"
@@ -65,10 +74,15 @@ void print_help() {
         << "                       mutually exclusive with APIGATE_UPSTREAM_*\n";
 }
 
-void print_version() { std::cout << "api-gate " << apigate::version << '\n'; }
+void print_version()
+{
+    std::cout << "api-gate " << apigate::version << '\n';
+}
 
-void write_bootstrap_error(std::string_view category, std::string_view message) noexcept {
-    try {
+void write_bootstrap_error(std::string_view category, std::string_view message) noexcept
+{
+    try
+    {
         std::cerr << nlohmann::json{
                          {"level", "error"},
                          {"event", "bootstrap_failed"},
@@ -77,28 +91,35 @@ void write_bootstrap_error(std::string_view category, std::string_view message) 
                      }
                          .dump()
                   << '\n';
-    } catch (...) {
+    }
+    catch (...)
+    {
         std::cerr << "{\"level\":\"error\",\"event\":\"bootstrap_failed\"}\n";
     }
 }
 
 }  // namespace
 
-int main(int argc, char* argv[]) {
-    try {
+int main(int argc, char* argv[])
+{
+    try
+    {
         const Command command = parse_command_line(argc, argv);
-        if (command == Command::help) {
+        if (command == Command::help)
+        {
             print_help();
             return EXIT_SUCCESS;
         }
-        if (command == Command::version) {
+        if (command == Command::version)
+        {
             print_version();
             return EXIT_SUCCESS;
         }
 
         const apigate::AppConfig config = apigate::load_config_from_environment();
         apigate::StructuredLogger logger{config};
-        if (command == Command::check_config) {
+        if (command == Command::check_config)
+        {
             nlohmann::json fields{
                 {"log_level", apigate::to_string(config.log_level)},
                 {"listen_address", config.listen_address},
@@ -108,10 +129,12 @@ int main(int argc, char* argv[]) {
                 {"max_in_flight_bytes", config.max_in_flight_bytes},
                 {"shutdown_grace_ms", config.shutdown_grace_ms},
                 {"proxy_enabled", config.upstream.has_value() || !config.routes.empty()}};
-            if (!config.routes.empty()) {
+            if (!config.routes.empty())
+            {
                 fields["route_count"] = config.routes.size();
             }
-            if (config.upstream) {
+            if (config.upstream)
+            {
                 fields["upstream_timeout_ms"] = config.upstream->timeout_ms;
             }
             logger.write_configuration_valid(fields);
@@ -120,13 +143,21 @@ int main(int argc, char* argv[]) {
 
         apigate::Application application{config, logger};
         return application.run();
-    } catch (const apigate::ConfigError& error) {
+    }
+    catch (const apigate::ConfigError& error)
+    {
         write_bootstrap_error("configuration", error.what());
-    } catch (const std::invalid_argument& error) {
+    }
+    catch (const std::invalid_argument& error)
+    {
         write_bootstrap_error("arguments", error.what());
-    } catch (const std::exception& error) {
+    }
+    catch (const std::exception& error)
+    {
         write_bootstrap_error("runtime", error.what());
-    } catch (...) {
+    }
+    catch (...)
+    {
         write_bootstrap_error("runtime", "unknown failure");
     }
     return EXIT_FAILURE;

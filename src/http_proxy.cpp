@@ -17,8 +17,10 @@
 #include <string>
 #include <utility>
 
-namespace apigate {
-namespace {
+namespace apigate
+{
+namespace
+{
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -28,48 +30,62 @@ using tcp = asio::ip::tcp;
 constexpr std::uint64_t max_upstream_body_bytes = std::uint64_t{1024} * 1024;
 constexpr std::size_t max_upstream_header_bytes = std::size_t{16} * 1024;
 
-void write_proxy_fallback_diagnostic(const char* event, int error_code) noexcept {
+void write_proxy_fallback_diagnostic(const char* event, int error_code) noexcept
+{
     if (std::fprintf(stderr, R"({"level":"error","payload":{"event":"%s","error_code":%d}}%c)",
-                     event, error_code, 10) < 0) {
+                     event, error_code, 10) < 0)
+    {
         std::clearerr(stderr);
     }
 }
 
-[[nodiscard]] std::string lowercase(std::string_view value) {
+[[nodiscard]] std::string lowercase(std::string_view value)
+{
     std::string result{value};
-    std::ranges::transform(result, result.begin(), [](unsigned char character) {
-        if (character >= 'A' && character <= 'Z') {
-            return static_cast<char>(character - 'A' + 'a');
-        }
-        return static_cast<char>(character);
-    });
+    std::ranges::transform(result, result.begin(),
+                           [](unsigned char character)
+                           {
+                               if (character >= 'A' && character <= 'Z')
+                               {
+                                   return static_cast<char>(character - 'A' + 'a');
+                               }
+                               return static_cast<char>(character);
+                           });
     return result;
 }
 
-[[nodiscard]] std::string trim_http_token(std::string_view value) {
+[[nodiscard]] std::string trim_http_token(std::string_view value)
+{
     const auto first = value.find_first_not_of(" \t");
-    if (first == std::string_view::npos) {
+    if (first == std::string_view::npos)
+    {
         return {};
     }
     const auto last = value.find_last_not_of(" \t");
     return lowercase(value.substr(first, last - first + 1));
 }
 
-[[nodiscard]] std::set<std::string> connection_tokens(const http::fields& fields) {
+[[nodiscard]] std::set<std::string> connection_tokens(const http::fields& fields)
+{
     std::set<std::string> tokens;
-    for (const auto& field : fields) {
-        if (field.name() != http::field::connection) {
+    for (const auto& field : fields)
+    {
+        if (field.name() != http::field::connection)
+        {
             continue;
         }
         const std::string_view value{field.value().data(), field.value().size()};
         std::size_t begin = 0;
-        while (begin <= value.size()) {
+        while (begin <= value.size())
+        {
             const auto end = value.find(',', begin);
             const auto token = trim_http_token(value.substr(begin, end - begin));
-            if (!token.empty()) {
+            if (!token.empty())
+            {
                 tokens.insert(token);
             }
-            if (end == std::string_view::npos) {
+            if (end == std::string_view::npos)
+            {
                 break;
             }
             begin = end + 1;
@@ -78,8 +94,8 @@ void write_proxy_fallback_diagnostic(const char* event, int error_code) noexcept
     return tokens;
 }
 
-[[nodiscard]] bool is_hop_by_hop(std::string_view name,
-                                 const std::set<std::string>& dynamic_tokens) {
+[[nodiscard]] bool is_hop_by_hop(std::string_view name, const std::set<std::string>& dynamic_tokens)
+{
     const auto normalized = lowercase(name);
     return normalized == "connection" || normalized == "keep-alive" || normalized == "te" ||
            normalized == "trailer" || normalized == "transfer-encoding" ||
@@ -88,14 +104,17 @@ void write_proxy_fallback_diagnostic(const char* event, int error_code) noexcept
            dynamic_tokens.contains(normalized);
 }
 
-[[nodiscard]] bool is_forwarding_metadata(std::string_view name) {
+[[nodiscard]] bool is_forwarding_metadata(std::string_view name)
+{
     return lowercase(name).starts_with("x-forwarded-");
 }
 
 }  // namespace
 
-std::string_view to_string(ProxyFailureStage stage) noexcept {
-    switch (stage) {
+std::string_view to_string(ProxyFailureStage stage) noexcept
+{
+    switch (stage)
+    {
         case ProxyFailureStage::resolve:
             return "resolve";
         case ProxyFailureStage::connect:
@@ -114,33 +133,41 @@ std::string_view to_string(ProxyFailureStage stage) noexcept {
     return "read";
 }
 
-namespace detail {
+namespace detail
+{
 
-bool ProxyCompletionState::claim() noexcept {
-    if (completed_) {
+bool ProxyCompletionState::claim() noexcept
+{
+    if (completed_)
+    {
         return false;
     }
     completed_ = true;
     return true;
 }
 
-std::string make_upstream_authority(std::string_view host, std::uint16_t port) {
+std::string make_upstream_authority(std::string_view host, std::uint16_t port)
+{
     const bool ipv6_literal = host.find(':') != std::string_view::npos;
     const std::string port_text = std::to_string(port);
-    if (ipv6_literal) {
+    if (ipv6_literal)
+    {
         return '[' + std::string{host} + "]:" + port_text;
     }
     return std::string{host} + ':' + port_text;
 }
 
-HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRequest& request) {
+HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRequest& request)
+{
     const auto& config = selected.upstream;
     std::string_view target{request.target().data(), request.target().size()};
     std::string rewritten_target;
-    if (selected.strip_prefix && !selected.prefix.empty() && selected.prefix != "/") {
+    if (selected.strip_prefix && !selected.prefix.empty() && selected.prefix != "/")
+    {
         // Selection already established the raw path boundary. Do not decode or select again.
         target.remove_prefix(selected.prefix.size());
-        if (target.empty() || target.front() == '?') {
+        if (target.empty() || target.front() == '?')
+        {
             rewritten_target = '/';
             rewritten_target.append(target);
             target = rewritten_target;
@@ -148,11 +175,13 @@ HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRe
     }
     HttpRequest upstream{request.method(), target, 11};
     const auto dynamic_tokens = connection_tokens(request.base());
-    for (const auto& field : request.base()) {
+    for (const auto& field : request.base())
+    {
         const std::string_view name{field.name_string().data(), field.name_string().size()};
         if (is_hop_by_hop(name, dynamic_tokens) || is_forwarding_metadata(name) ||
             field.name() == http::field::host || field.name() == http::field::content_length ||
-            field.name() == http::field::expect) {
+            field.name() == http::field::expect)
+        {
             continue;
         }
         upstream.insert(field.name_string(), field.value());
@@ -160,22 +189,28 @@ HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRe
     upstream.set(http::field::host, make_upstream_authority(config.host, config.port));
     upstream.set(http::field::connection, "close");
     upstream.body() = request.body();
-    if (request.method() != http::verb::get) {
+    if (request.method() != http::verb::get)
+    {
         upstream.content_length(upstream.body().size());
-    } else if (!request.body().empty()) {
+    }
+    else if (!request.body().empty())
+    {
         upstream.prepare_payload();
     }
     return upstream;
 }
 
-HttpResponse make_downstream_response(const HttpRequest& request, HttpResponse upstream_response) {
+HttpResponse make_downstream_response(const HttpRequest& request, HttpResponse upstream_response)
+{
     HttpResponse response{upstream_response.result(), request.version()};
     response.reason(upstream_response.reason());
     const auto dynamic_tokens = connection_tokens(upstream_response.base());
-    for (const auto& field : upstream_response.base()) {
+    for (const auto& field : upstream_response.base())
+    {
         const std::string_view name{field.name_string().data(), field.name_string().size()};
         if (is_hop_by_hop(name, dynamic_tokens) || field.name() == http::field::server ||
-            field.name() == http::field::content_length) {
+            field.name() == http::field::content_length)
+        {
             continue;
         }
         response.insert(field.name_string(), field.value());
@@ -189,7 +224,8 @@ HttpResponse make_downstream_response(const HttpRequest& request, HttpResponse u
 
 }  // namespace detail
 
-class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExchange::Impl> {
+class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExchange::Impl>
+{
    public:
     Impl(const asio::any_io_executor& executor, const SelectedUpstream& selected,
          const HttpRequest& request, std::shared_ptr<detail::BufferBudgetState> buffer_budget,
@@ -204,32 +240,44 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
           buffer_budget_(std::move(buffer_budget)),
           request_body_permit_(std::move(request_body_permit)),
           on_complete_(std::move(on_complete)),
-          on_abort_(std::move(on_abort)) {
-        if (!buffer_budget_) {
+          on_abort_(std::move(on_abort))
+    {
+        if (!buffer_budget_)
+        {
             throw std::invalid_argument("buffer budget must not be empty");
         }
-        if (!on_complete_) {
+        if (!on_complete_)
+        {
             throw std::invalid_argument("proxy completion callback must not be empty");
         }
-        if (!on_abort_) {
+        if (!on_abort_)
+        {
             throw std::invalid_argument("proxy abort callback must not be empty");
         }
         response_parser_.body_limit(max_upstream_body_bytes);
         response_parser_.header_limit(max_upstream_header_bytes);
     }
 
-    void start() {
+    void start()
+    {
         begin_deadline();
         resolver_.async_resolve(
             config_.host, std::to_string(config_.port),
             [self = shared_from_this()](const boost::system::error_code& error,
-                                        const tcp::resolver::results_type& results) noexcept {
-                self->run_handler([self, &error, &results] { self->on_resolve(error, results); });
+                                        const tcp::resolver::results_type& results) noexcept
+            {
+                self->run_handler(
+                    [self, &error, &results]
+                    {
+                        self->on_resolve(error, results);
+                    });
             });
     }
 
-    void cancel() noexcept {
-        if (!completion_state_.claim()) {
+    void cancel() noexcept
+    {
+        if (!completion_state_.claim())
+        {
             return;
         }
         on_complete_ = nullptr;
@@ -238,74 +286,103 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
     }
 
    private:
-    void begin_deadline() {
+    void begin_deadline()
+    {
         ++deadline_generation_;
         const auto generation = deadline_generation_;
         deadline_.expires_after(std::chrono::milliseconds{config_.timeout_ms});
-        deadline_.async_wait([self = shared_from_this(),
-                              generation](const boost::system::error_code& error) noexcept {
-            self->run_handler([self, generation, &error] {
-                if (!error && generation == self->deadline_generation_) {
-                    self->fail(ProxyFailureStage::timeout, asio::error::timed_out);
-                }
+        deadline_.async_wait(
+            [self = shared_from_this(), generation](const boost::system::error_code& error) noexcept
+            {
+                self->run_handler(
+                    [self, generation, &error]
+                    {
+                        if (!error && generation == self->deadline_generation_)
+                        {
+                            self->fail(ProxyFailureStage::timeout, asio::error::timed_out);
+                        }
+                    });
             });
-        });
     }
 
-    void finish_deadline() noexcept {
+    void finish_deadline() noexcept
+    {
         ++deadline_generation_;
-        try {
+        try
+        {
             static_cast<void>(deadline_.cancel());
-        } catch (const boost::system::system_error& error) {
+        }
+        catch (const boost::system::system_error& error)
+        {
             write_proxy_fallback_diagnostic("http_proxy_timer_cancel_failed", error.code().value());
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_proxy_fallback_diagnostic("http_proxy_timer_cancel_failed", 0);
         }
     }
 
     void on_resolve(const boost::system::error_code& error,
-                    const tcp::resolver::results_type& results) {
-        if (completion_claimed()) {
+                    const tcp::resolver::results_type& results)
+    {
+        if (completion_claimed())
+        {
             return;
         }
         finish_deadline();
-        if (error) {
+        if (error)
+        {
             fail(ProxyFailureStage::resolve, error);
             return;
         }
         begin_deadline();
         stream_.async_connect(
-            results, [self = shared_from_this()](
-                         const boost::system::error_code& connect_error,
-                         const tcp::resolver::results_type::endpoint_type&) noexcept {
-                self->run_handler([self, &connect_error] { self->on_connect(connect_error); });
+            results,
+            [self = shared_from_this()](const boost::system::error_code& connect_error,
+                                        const tcp::resolver::results_type::endpoint_type&) noexcept
+            {
+                self->run_handler(
+                    [self, &connect_error]
+                    {
+                        self->on_connect(connect_error);
+                    });
             });
     }
 
-    void on_connect(const boost::system::error_code& error) {
-        if (completion_claimed()) {
+    void on_connect(const boost::system::error_code& error)
+    {
+        if (completion_claimed())
+        {
             return;
         }
         finish_deadline();
-        if (error) {
+        if (error)
+        {
             fail(ProxyFailureStage::connect, error);
             return;
         }
         begin_deadline();
-        http::async_write(
-            stream_, upstream_request_,
-            [self = shared_from_this()](const boost::system::error_code& write_error,
-                                        std::size_t) noexcept {
-                self->run_handler([self, &write_error] { self->on_write(write_error); });
-            });
+        http::async_write(stream_, upstream_request_,
+                          [self = shared_from_this()](const boost::system::error_code& write_error,
+                                                      std::size_t) noexcept
+                          {
+                              self->run_handler(
+                                  [self, &write_error]
+                                  {
+                                      self->on_write(write_error);
+                                  });
+                          });
     }
 
-    void on_write(const boost::system::error_code& error) {
-        if (completion_claimed()) {
+    void on_write(const boost::system::error_code& error)
+    {
+        if (completion_claimed())
+        {
             return;
         }
         finish_deadline();
-        if (error) {
+        if (error)
+        {
             fail(ProxyFailureStage::write, error);
             return;
         }
@@ -313,16 +390,24 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
         http::async_read_header(
             stream_, buffer_, response_parser_,
             [self = shared_from_this()](const boost::system::error_code& read_error,
-                                        std::size_t) noexcept {
-                self->run_handler([self, &read_error] { self->on_read_header(read_error); });
+                                        std::size_t) noexcept
+            {
+                self->run_handler(
+                    [self, &read_error]
+                    {
+                        self->on_read_header(read_error);
+                    });
             });
     }
 
-    void on_read_header(const boost::system::error_code& error) {
-        if (completion_claimed()) {
+    void on_read_header(const boost::system::error_code& error)
+    {
+        if (completion_claimed())
+        {
             return;
         }
-        if (error) {
+        if (error)
+        {
             finish_deadline();
             const auto stage = error == http::error::body_limit
                                    ? ProxyFailureStage::response_too_large
@@ -330,7 +415,8 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
             fail(stage, error);
             return;
         }
-        if (response_parser_.get().result_int() < 200U) {
+        if (response_parser_.get().result_int() < 200U)
+        {
             finish_deadline();
             fail(ProxyFailureStage::invalid_response, {});
             return;
@@ -341,38 +427,48 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
             content_length ? std::optional<std::uint64_t>{*content_length} : std::nullopt;
         const auto plan = detail::plan_body_reservation(
             planned_content_length, response_parser_.is_done(), max_upstream_body_bytes);
-        if (plan.kind == detail::BodyReservationKind::too_large) {
+        if (plan.kind == detail::BodyReservationKind::too_large)
+        {
             finish_deadline();
             fail(ProxyFailureStage::response_too_large, http::error::body_limit);
             return;
         }
-        if (plan.kind == detail::BodyReservationKind::none) {
+        if (plan.kind == detail::BodyReservationKind::none)
+        {
             finish_deadline();
             finish_response();
             return;
         }
 
         auto permit = buffer_budget_->try_acquire(plan.bytes);
-        if (!permit) {
+        if (!permit)
+        {
             finish_deadline();
             reject_buffer_budget(plan.bytes);
             return;
         }
         response_body_permit_ = std::move(*permit);
-        http::async_read(
-            stream_, buffer_, response_parser_,
-            [self = shared_from_this()](const boost::system::error_code& read_error,
-                                        std::size_t) noexcept {
-                self->run_handler([self, &read_error] { self->on_read_body(read_error); });
-            });
+        http::async_read(stream_, buffer_, response_parser_,
+                         [self = shared_from_this()](const boost::system::error_code& read_error,
+                                                     std::size_t) noexcept
+                         {
+                             self->run_handler(
+                                 [self, &read_error]
+                                 {
+                                     self->on_read_body(read_error);
+                                 });
+                         });
     }
 
-    void on_read_body(const boost::system::error_code& error) {
-        if (completion_claimed()) {
+    void on_read_body(const boost::system::error_code& error)
+    {
+        if (completion_claimed())
+        {
             return;
         }
         finish_deadline();
-        if (error) {
+        if (error)
+        {
             const auto stage = error == http::error::body_limit
                                    ? ProxyFailureStage::response_too_large
                                    : ProxyFailureStage::read;
@@ -380,14 +476,16 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
             return;
         }
         const auto actual_bytes = static_cast<std::uint64_t>(response_parser_.get().body().size());
-        if (!response_body_permit_.shrink_to(actual_bytes)) {
+        if (!response_body_permit_.shrink_to(actual_bytes))
+        {
             fail(ProxyFailureStage::read, {});
             return;
         }
         finish_response();
     }
 
-    void finish_response() {
+    void finish_response()
+    {
         auto upstream_response = response_parser_.release();
         close_upstream();
         auto response =
@@ -397,15 +495,18 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
         complete(std::move(result));
     }
 
-    void reject_buffer_budget(std::uint64_t requested_bytes) {
+    void reject_buffer_budget(std::uint64_t requested_bytes)
+    {
         cancel_operations();
         auto response = make_gateway_error_response(downstream_request_,
                                                     GatewayFailure::buffer_capacity_exhausted);
         complete(ProxyResult{std::move(response), std::nullopt, requested_bytes, {}});
     }
 
-    void fail(ProxyFailureStage stage, const boost::system::error_code& error) {
-        if (completion_claimed()) {
+    void fail(ProxyFailureStage stage, const boost::system::error_code& error)
+    {
+        if (completion_claimed())
+        {
             return;
         }
         finish_deadline();
@@ -417,92 +518,125 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
             ProxyResult{std::move(response), ProxyFailure{stage, error.value()}, std::nullopt, {}});
     }
 
-    [[nodiscard]] bool completion_claimed() const noexcept { return completion_observed_; }
+    [[nodiscard]] bool completion_claimed() const noexcept
+    {
+        return completion_observed_;
+    }
 
     template <typename HandlerAction>
-    void run_handler(HandlerAction&& handler) noexcept {
+    void run_handler(HandlerAction&& handler) noexcept
+    {
         detail::run_proxy_handler_action(
             completion_state_, std::forward<HandlerAction>(handler),
-            [this]() noexcept { cancel_operations(); },
-            [this]() noexcept {
+            [this]() noexcept
+            {
+                cancel_operations();
+            },
+            [this]() noexcept
+            {
                 write_proxy_fallback_diagnostic("http_proxy_handler_exception", 0);
                 notify_abort();
             });
     }
 
-    void complete(ProxyResult result) {
+    void complete(ProxyResult result)
+    {
         detail::run_proxy_completion_action(
             completion_state_,
-            [this, &result] {
+            [this, &result]
+            {
                 completion_observed_ = true;
                 auto callback = std::move(on_complete_);
-                if (!callback) {
+                if (!callback)
+                {
                     notify_abort();
                     return;
                 }
                 callback(std::move(result));
                 on_abort_ = nullptr;
             },
-            [this]() noexcept {
+            [this]() noexcept
+            {
                 completion_observed_ = true;
                 write_proxy_fallback_diagnostic("http_proxy_completion_exception", 0);
                 notify_abort();
             });
     }
 
-    void notify_abort() noexcept {
+    void notify_abort() noexcept
+    {
         on_complete_ = nullptr;
         auto callback = std::move(on_abort_);
-        if (!callback) {
+        if (!callback)
+        {
             return;
         }
-        try {
+        try
+        {
             callback();
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_proxy_fallback_diagnostic("http_proxy_abort_callback_exception", 0);
         }
     }
 
-    void cancel_operations() noexcept {
+    void cancel_operations() noexcept
+    {
         completion_observed_ = true;
-        try {
+        try
+        {
             resolver_.cancel();
-        } catch (const boost::system::system_error& error) {
+        }
+        catch (const boost::system::system_error& error)
+        {
             write_proxy_fallback_diagnostic("http_proxy_resolver_cancel_failed",
                                             error.code().value());
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_proxy_fallback_diagnostic("http_proxy_resolver_cancel_failed", 0);
         }
-        try {
+        try
+        {
             static_cast<void>(deadline_.cancel());
-        } catch (const boost::system::system_error& error) {
+        }
+        catch (const boost::system::system_error& error)
+        {
             write_proxy_fallback_diagnostic("http_proxy_timer_cancel_failed", error.code().value());
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_proxy_fallback_diagnostic("http_proxy_timer_cancel_failed", 0);
         }
         close_upstream();
     }
 
-    void close_upstream() noexcept {
-        if (!stream_.socket().is_open()) {
+    void close_upstream() noexcept
+    {
+        if (!stream_.socket().is_open())
+        {
             return;
         }
         boost::system::error_code operation_error;
         const auto cancel_error = stream_.socket().cancel(operation_error);
-        if (cancel_error && cancel_error != asio::error::not_connected) {
+        if (cancel_error && cancel_error != asio::error::not_connected)
+        {
             write_proxy_fallback_diagnostic("http_proxy_socket_cancel_failed",
                                             cancel_error.value());
         }
         operation_error.clear();
         const auto shutdown_error =
             stream_.socket().shutdown(tcp::socket::shutdown_both, operation_error);
-        if (shutdown_error && shutdown_error != asio::error::not_connected) {
+        if (shutdown_error && shutdown_error != asio::error::not_connected)
+        {
             write_proxy_fallback_diagnostic("http_proxy_socket_shutdown_failed",
                                             shutdown_error.value());
         }
         operation_error.clear();
         const auto close_error = stream_.socket().close(operation_error);
-        if (close_error) {
+        if (close_error)
+        {
             write_proxy_fallback_diagnostic("http_proxy_socket_close_failed", close_error.value());
         }
     }
@@ -535,12 +669,20 @@ HttpProxyExchange::HttpProxyExchange(
     // NOLINTNEXTLINE(clang-analyzer-optin.cplusplus.VirtualCall)
     : impl_(std::make_shared<Impl>(executor, selected, request, std::move(buffer_budget),
                                    std::move(request_body_permit), std::move(on_complete),
-                                   std::move(on_abort))) {}
+                                   std::move(on_abort)))
+{
+}
 
 HttpProxyExchange::~HttpProxyExchange() = default;
 
-void HttpProxyExchange::start() { impl_->start(); }
+void HttpProxyExchange::start()
+{
+    impl_->start();
+}
 
-void HttpProxyExchange::cancel() noexcept { impl_->cancel(); }
+void HttpProxyExchange::cancel() noexcept
+{
+    impl_->cancel();
+}
 
 }  // namespace apigate

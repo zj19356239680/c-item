@@ -13,14 +13,17 @@
 
 // Defined only in the separate test target's copy of http_server.cpp. Neither
 // these controls nor the probe methods are compiled into apigate_core/api-gate.
-namespace apigate::detail {
+namespace apigate::detail
+{
 
-struct SessionWriteSnapshot {
+struct SessionWriteSnapshot
+{
     bool pending;
     std::size_t body_bytes;
 };
 
-struct SessionWriteProbe {
+struct SessionWriteProbe
+{
     std::function<SessionWriteSnapshot()> snapshot;
     std::function<void()> stop;
 };

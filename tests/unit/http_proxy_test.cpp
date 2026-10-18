@@ -8,11 +8,13 @@
 #include <stdexcept>
 #include <string>
 
-namespace {
+namespace
+{
 
 namespace http = boost::beast::http;
 
-[[nodiscard]] apigate::HttpRequest make_request() {
+[[nodiscard]] apigate::HttpRequest make_request()
+{
     apigate::HttpRequest request{http::verb::get, "/resource?key=value", 11};
     request.set(http::field::host, "gateway.local");
     request.set(http::field::authorization, "Bearer private-value");
@@ -25,14 +27,16 @@ namespace http = boost::beast::http;
     return request;
 }
 
-TEST(HttpProxyTest, BuildsAuthoritiesForDnsIpv4AndIpv6) {
+TEST(HttpProxyTest, BuildsAuthoritiesForDnsIpv4AndIpv6)
+{
     EXPECT_EQ(apigate::detail::make_upstream_authority("upstream.internal", 8080),
               "upstream.internal:8080");
     EXPECT_EQ(apigate::detail::make_upstream_authority("127.0.0.1", 80), "127.0.0.1:80");
     EXPECT_EQ(apigate::detail::make_upstream_authority("::1", 8080), "[::1]:8080");
 }
 
-TEST(HttpProxyTest, FiltersRequestHopByHopHeadersAndPreservesEndToEndHeaders) {
+TEST(HttpProxyTest, FiltersRequestHopByHopHeadersAndPreservesEndToEndHeaders)
+{
     const apigate::UpstreamConfig config{"::1", 8080, 3000};
 
     const auto upstream = apigate::detail::make_upstream_request({config, {}}, make_request());
@@ -49,9 +53,11 @@ TEST(HttpProxyTest, FiltersRequestHopByHopHeadersAndPreservesEndToEndHeaders) {
     EXPECT_TRUE(upstream.body().empty());
 }
 
-TEST(HttpProxyTest, PreservesBodyMethodAndPayloadWithRegeneratedLength) {
+TEST(HttpProxyTest, PreservesBodyMethodAndPayloadWithRegeneratedLength)
+{
     const apigate::UpstreamConfig config{"upstream.internal", 8080, 3000};
-    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch}) {
+    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch})
+    {
         auto request = make_request();
         request.method(method);
         request.set(http::field::content_type, "application/octet-stream");
@@ -69,9 +75,11 @@ TEST(HttpProxyTest, PreservesBodyMethodAndPayloadWithRegeneratedLength) {
     }
 }
 
-TEST(HttpProxyTest, RegeneratesZeroLengthForEmptyBodyMethods) {
+TEST(HttpProxyTest, RegeneratesZeroLengthForEmptyBodyMethods)
+{
     const apigate::UpstreamConfig config{"upstream.internal", 8080, 3000};
-    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch}) {
+    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch})
+    {
         auto request = make_request();
         request.method(method);
 
@@ -83,13 +91,15 @@ TEST(HttpProxyTest, RegeneratesZeroLengthForEmptyBodyMethods) {
     }
 }
 
-TEST(HttpProxyTest, BuildsTargetsFromTheSelectedRouteWithoutChangingTheDownstreamRequest) {
+TEST(HttpProxyTest, BuildsTargetsFromTheSelectedRouteWithoutChangingTheDownstreamRequest)
+{
     apigate::AppConfig config;
     config.routes = {{"/users", {"users", 8001, 100}, true},
                      {"/users/admin", {"admins", 8002, 200}, false},
                      {"/orders", {"orders", 8003, 300}},
                      {"/", {"fallback", 8004, 400}, true}};
-    struct TargetCase {
+    struct TargetCase
+    {
         const char* downstream;
         const char* upstream;
         const char* host;
@@ -111,16 +121,20 @@ TEST(HttpProxyTest, BuildsTargetsFromTheSelectedRouteWithoutChangingTheDownstrea
         {"/other//%2f?x=&x=%2F", "/other//%2f?x=&x=%2F", "fallback:8004"},
         {"/?", "/?", "fallback:8004"},
     };
-    for (const auto& entry : cases) {
-        for (const auto method : {http::verb::get, http::verb::post}) {
+    for (const auto& entry : cases)
+    {
+        for (const auto method : {http::verb::get, http::verb::post})
+        {
             auto request = make_request();
             request.method(method);
             request.target(entry.downstream);
-            if (method == http::verb::post) {
+            if (method == http::verb::post)
+            {
                 request.body() = "unchanged-request-body";
             }
             const auto selected = apigate::select_http_upstream(config, request);
-            if (!selected) {
+            if (!selected)
+            {
                 FAIL() << "expected a matching route";
                 continue;
             }
@@ -130,7 +144,8 @@ TEST(HttpProxyTest, BuildsTargetsFromTheSelectedRouteWithoutChangingTheDownstrea
             EXPECT_EQ(upstream.method(), method);
             EXPECT_EQ(upstream.body(), request.body());
             EXPECT_EQ(request.target(), entry.downstream);
-            if (method == http::verb::post) {
+            if (method == http::verb::post)
+            {
                 EXPECT_EQ(upstream[http::field::content_length],
                           std::to_string(request.body().size()));
                 EXPECT_EQ(request.body(), "unchanged-request-body");
@@ -139,7 +154,8 @@ TEST(HttpProxyTest, BuildsTargetsFromTheSelectedRouteWithoutChangingTheDownstrea
     }
 }
 
-TEST(HttpProxyTest, FiltersResponseHopByHopHeadersAndOverridesServer) {
+TEST(HttpProxyTest, FiltersResponseHopByHopHeadersAndOverridesServer)
+{
     const auto request = make_request();
     apigate::HttpResponse upstream{http::status::created, 11};
     upstream.set(http::field::server, "private-upstream");
@@ -161,7 +177,8 @@ TEST(HttpProxyTest, FiltersResponseHopByHopHeadersAndOverridesServer) {
     EXPECT_TRUE(response.keep_alive());
 }
 
-TEST(HttpProxyTest, CompletionAndCancellationCanOnlyClaimOnce) {
+TEST(HttpProxyTest, CompletionAndCancellationCanOnlyClaimOnce)
+{
     apigate::detail::ProxyCompletionState completed;
     EXPECT_TRUE(completed.claim());
     EXPECT_FALSE(completed.claim());
@@ -171,7 +188,8 @@ TEST(HttpProxyTest, CompletionAndCancellationCanOnlyClaimOnce) {
     EXPECT_FALSE(cancelled.claim());
 }
 
-TEST(HttpProxyTest, ExposesStableFailureStages) {
+TEST(HttpProxyTest, ExposesStableFailureStages)
+{
     EXPECT_EQ(apigate::to_string(apigate::ProxyFailureStage::resolve), "resolve");
     EXPECT_EQ(apigate::to_string(apigate::ProxyFailureStage::connect), "connect");
     EXPECT_EQ(apigate::to_string(apigate::ProxyFailureStage::write), "write");
@@ -182,15 +200,27 @@ TEST(HttpProxyTest, ExposesStableFailureStages) {
     EXPECT_EQ(apigate::to_string(apigate::ProxyFailureStage::invalid_response), "invalid_response");
 }
 
-TEST(HttpProxyTest, HandlerExceptionCleansUpAndAbortsOnlyOnce) {
+TEST(HttpProxyTest, HandlerExceptionCleansUpAndAbortsOnlyOnce)
+{
     apigate::detail::ProxyCompletionState state;
     std::size_t cleanup_count = 0;
     std::size_t abort_count = 0;
-    const auto run_throwing_handler = [&] {
+    const auto run_throwing_handler = [&]
+    {
         apigate::detail::run_proxy_handler_action(
-            state, [] { throw std::runtime_error{"stage transition failed"}; },
-            [&cleanup_count]() noexcept { ++cleanup_count; },
-            [&abort_count]() noexcept { ++abort_count; });
+            state,
+            []
+            {
+                throw std::runtime_error{"stage transition failed"};
+            },
+            [&cleanup_count]() noexcept
+            {
+                ++cleanup_count;
+            },
+            [&abort_count]() noexcept
+            {
+                ++abort_count;
+            });
     };
 
     EXPECT_NO_THROW(run_throwing_handler());
@@ -199,34 +229,51 @@ TEST(HttpProxyTest, HandlerExceptionCleansUpAndAbortsOnlyOnce) {
     EXPECT_EQ(abort_count, 1U);
 }
 
-TEST(HttpProxyTest, SuccessfulHandlerDoesNotCleanUpOrAbort) {
+TEST(HttpProxyTest, SuccessfulHandlerDoesNotCleanUpOrAbort)
+{
     apigate::detail::ProxyCompletionState state;
     std::size_t handler_count = 0;
     std::size_t cleanup_count = 0;
     std::size_t abort_count = 0;
 
     apigate::detail::run_proxy_handler_action(
-        state, [&handler_count] { ++handler_count; },
-        [&cleanup_count]() noexcept { ++cleanup_count; },
-        [&abort_count]() noexcept { ++abort_count; });
+        state,
+        [&handler_count]
+        {
+            ++handler_count;
+        },
+        [&cleanup_count]() noexcept
+        {
+            ++cleanup_count;
+        },
+        [&abort_count]() noexcept
+        {
+            ++abort_count;
+        });
 
     EXPECT_EQ(handler_count, 1U);
     EXPECT_EQ(cleanup_count, 0U);
     EXPECT_EQ(abort_count, 0U);
 }
 
-TEST(HttpProxyTest, CompletionExceptionAbortsOnlyOnce) {
+TEST(HttpProxyTest, CompletionExceptionAbortsOnlyOnce)
+{
     apigate::detail::ProxyCompletionState state;
     std::size_t completion_count = 0;
     std::size_t abort_count = 0;
-    const auto run_throwing_completion = [&] {
+    const auto run_throwing_completion = [&]
+    {
         apigate::detail::run_proxy_completion_action(
             state,
-            [&completion_count] {
+            [&completion_count]
+            {
                 ++completion_count;
                 throw std::runtime_error{"completion failed"};
             },
-            [&abort_count]() noexcept { ++abort_count; });
+            [&abort_count]() noexcept
+            {
+                ++abort_count;
+            });
     };
 
     EXPECT_NO_THROW(run_throwing_completion());

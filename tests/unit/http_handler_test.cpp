@@ -8,12 +8,14 @@
 #include <string>
 #include <string_view>
 
-namespace {
+namespace
+{
 
 namespace http = boost::beast::http;
 
 [[nodiscard]] apigate::HttpRequest make_request(http::verb method, std::string_view target,
-                                                bool keep_alive = true) {
+                                                bool keep_alive = true)
+{
     const boost::beast::string_view beast_target{target.data(), target.size()};
     apigate::HttpRequest request{method, beast_target, 11};
     request.set(http::field::host, "localhost");
@@ -21,13 +23,15 @@ namespace http = boost::beast::http;
     return request;
 }
 
-[[nodiscard]] apigate::AppConfig proxy_config() {
+[[nodiscard]] apigate::AppConfig proxy_config()
+{
     apigate::AppConfig config;
     config.upstream = apigate::UpstreamConfig{"upstream.internal", 8080, 3000};
     return config;
 }
 
-TEST(HttpHandlerTest, ReturnsHealthStatus) {
+TEST(HttpHandlerTest, ReturnsHealthStatus)
+{
     const apigate::AppConfig config;
     const auto response =
         apigate::handle_http_request(config, make_request(http::verb::get, "/healthz"));
@@ -39,7 +43,8 @@ TEST(HttpHandlerTest, ReturnsHealthStatus) {
     EXPECT_EQ(body.at("service"), "api-gate");
 }
 
-TEST(HttpHandlerTest, ReturnsReadyStatusWithQueryString) {
+TEST(HttpHandlerTest, ReturnsReadyStatusWithQueryString)
+{
     const apigate::AppConfig config;
     const auto response =
         apigate::handle_http_request(config, make_request(http::verb::get, "/readyz?probe=1"));
@@ -48,7 +53,8 @@ TEST(HttpHandlerTest, ReturnsReadyStatusWithQueryString) {
     EXPECT_EQ(nlohmann::json::parse(response.body()).at("status"), "ready");
 }
 
-TEST(HttpHandlerTest, ReturnsNotFoundForUnknownPath) {
+TEST(HttpHandlerTest, ReturnsNotFoundForUnknownPath)
+{
     const apigate::AppConfig config;
     const auto response =
         apigate::handle_http_request(config, make_request(http::verb::get, "/missing"));
@@ -57,7 +63,8 @@ TEST(HttpHandlerTest, ReturnsNotFoundForUnknownPath) {
     EXPECT_EQ(nlohmann::json::parse(response.body()).at("error").at("code"), "not_found");
 }
 
-TEST(HttpHandlerTest, RejectsUnsupportedMethod) {
+TEST(HttpHandlerTest, RejectsUnsupportedMethod)
+{
     const apigate::AppConfig config;
     const auto response =
         apigate::handle_http_request(config, make_request(http::verb::post, "/healthz"));
@@ -66,7 +73,8 @@ TEST(HttpHandlerTest, RejectsUnsupportedMethod) {
     EXPECT_EQ(response[http::field::allow], "GET");
 }
 
-TEST(HttpHandlerTest, PreservesKeepAlivePreference) {
+TEST(HttpHandlerTest, PreservesKeepAlivePreference)
+{
     const apigate::AppConfig config;
     const auto persistent =
         apigate::handle_http_request(config, make_request(http::verb::get, "/healthz", true));
@@ -77,7 +85,8 @@ TEST(HttpHandlerTest, PreservesKeepAlivePreference) {
     EXPECT_FALSE(closing.keep_alive());
 }
 
-TEST(HttpHandlerTest, KeepsHealthRoutesLocalWhenProxyIsEnabled) {
+TEST(HttpHandlerTest, KeepsHealthRoutesLocalWhenProxyIsEnabled)
+{
     const auto config = proxy_config();
 
     EXPECT_FALSE(apigate::should_proxy_http_request(
@@ -89,12 +98,14 @@ TEST(HttpHandlerTest, KeepsHealthRoutesLocalWhenProxyIsEnabled) {
         http::status::ok);
 }
 
-TEST(HttpHandlerTest, ProxiesSupportedMethodsOnUnmatchedRoutes) {
+TEST(HttpHandlerTest, ProxiesSupportedMethodsOnUnmatchedRoutes)
+{
     const auto config = proxy_config();
     auto proxy_request = make_request(http::verb::get, "/resource?key=value");
 
     EXPECT_TRUE(apigate::should_proxy_http_request(config, proxy_request));
-    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch}) {
+    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch})
+    {
         auto body_request = make_request(method, "/resource?key=value");
         EXPECT_TRUE(apigate::should_proxy_http_request(config, body_request));
         body_request.body() = "bounded-body";
@@ -115,9 +126,11 @@ TEST(HttpHandlerTest, ProxiesSupportedMethodsOnUnmatchedRoutes) {
               "unsupported_request");
 }
 
-TEST(HttpHandlerTest, KeepsBodyMethodsDisabledWithoutAnUpstream) {
+TEST(HttpHandlerTest, KeepsBodyMethodsDisabledWithoutAnUpstream)
+{
     const apigate::AppConfig config;
-    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch}) {
+    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch})
+    {
         const auto response =
             apigate::handle_http_request(config, make_request(method, "/resource"));
         EXPECT_EQ(response.result(), http::status::method_not_allowed);
@@ -125,9 +138,11 @@ TEST(HttpHandlerTest, KeepsBodyMethodsDisabledWithoutAnUpstream) {
     }
 }
 
-TEST(HttpHandlerTest, KeepsLocalRoutesGetOnlyWhenProxyIsEnabled) {
+TEST(HttpHandlerTest, KeepsLocalRoutesGetOnlyWhenProxyIsEnabled)
+{
     const auto config = proxy_config();
-    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch}) {
+    for (const auto method : {http::verb::post, http::verb::put, http::verb::patch})
+    {
         const auto request = make_request(method, "/healthz");
         EXPECT_FALSE(apigate::should_proxy_http_request(config, request));
         const auto response = apigate::handle_http_request(config, request);
@@ -136,10 +151,12 @@ TEST(HttpHandlerTest, KeepsLocalRoutesGetOnlyWhenProxyIsEnabled) {
     }
 }
 
-TEST(HttpHandlerTest, RejectsMethodsOutsideTheProxyMvp) {
+TEST(HttpHandlerTest, RejectsMethodsOutsideTheProxyMvp)
+{
     const auto config = proxy_config();
     for (const auto method :
-         {http::verb::head, http::verb::delete_, http::verb::options, http::verb::connect}) {
+         {http::verb::head, http::verb::delete_, http::verb::options, http::verb::connect})
+    {
         const auto request = make_request(method, "/resource");
         EXPECT_FALSE(apigate::should_proxy_http_request(config, request));
         const auto response = apigate::handle_http_request(config, request);
@@ -148,7 +165,8 @@ TEST(HttpHandlerTest, RejectsMethodsOutsideTheProxyMvp) {
     }
 }
 
-TEST(HttpHandlerTest, RejectsUnsupportedProxyTargetAndUpgrade) {
+TEST(HttpHandlerTest, RejectsUnsupportedProxyTargetAndUpgrade)
+{
     const auto config = proxy_config();
     const auto absolute = make_request(http::verb::get, "http://example.test/resource");
     auto upgrade = make_request(http::verb::get, "/resource");
@@ -162,7 +180,8 @@ TEST(HttpHandlerTest, RejectsUnsupportedProxyTargetAndUpgrade) {
     EXPECT_EQ(apigate::handle_http_request(config, upgrade).result(), http::status::bad_request);
 }
 
-TEST(HttpHandlerTest, CreatesSafeGatewayErrors) {
+TEST(HttpHandlerTest, CreatesSafeGatewayErrors)
+{
     const auto request = make_request(http::verb::get, "/private?secret=value");
     const auto bad_gateway =
         apigate::make_gateway_error_response(request, apigate::GatewayFailure::bad_gateway);
@@ -197,7 +216,8 @@ TEST(HttpHandlerTest, CreatesSafeGatewayErrors) {
     EXPECT_EQ(buffer_exhausted.find(http::field::retry_after), buffer_exhausted.end());
 }
 
-TEST(HttpHandlerTest, SelectsLongestRawPathOnSegmentBoundariesRegardlessOfOrder) {
+TEST(HttpHandlerTest, SelectsLongestRawPathOnSegmentBoundariesRegardlessOfOrder)
+{
     apigate::AppConfig config;
     config.routes = {{"/users", {"users", 8001, 100}},
                      {"/users/admin", {"admins", 8002, 200}},
@@ -217,41 +237,53 @@ TEST(HttpHandlerTest, SelectsLongestRawPathOnSegmentBoundariesRegardlessOfOrder)
         {"/users/../orders", "users"},
         {"/", "fallback"},
     };
-    for (int order = 0; order < 2; ++order) {
-        for (const auto& [target, host] : cases) {
+    for (int order = 0; order < 2; ++order)
+    {
+        for (const auto& [target, host] : cases)
+        {
             const auto request = make_request(http::verb::get, target);
             const auto selected = apigate::select_http_upstream(config, request);
-            if (selected) {
+            if (selected)
+            {
                 EXPECT_EQ(selected->upstream.host, host);
-            } else {
+            }
+            else
+            {
                 FAIL() << "expected a matching route";
             }
         }
         std::ranges::reverse(config.routes);
     }
-    for (const char* target : {"/healthz?x", "/readyz"}) {
+    for (const char* target : {"/healthz?x", "/readyz"})
+    {
         const auto request = make_request(http::verb::get, target);
         EXPECT_FALSE(apigate::select_http_upstream(config, request).has_value());
         EXPECT_EQ(apigate::handle_http_request(config, request).result(), http::status::ok);
     }
 }
 
-TEST(HttpHandlerTest, RouteModeMissesStayLocalAndProtocolErrorsStayConsistent) {
+TEST(HttpHandlerTest, RouteModeMissesStayLocalAndProtocolErrorsStayConsistent)
+{
     apigate::AppConfig config;
     config.routes = {{"/users", {"users", 8001, 100}}};
     for (const auto method :
-         {http::verb::get, http::verb::post, http::verb::put, http::verb::patch}) {
+         {http::verb::get, http::verb::post, http::verb::put, http::verb::patch})
+    {
         const auto miss = make_request(method, "/users-extra?x");
         EXPECT_FALSE(apigate::should_proxy_http_request(config, miss));
         EXPECT_EQ(apigate::handle_http_request(config, miss).result(), http::status::not_found);
         auto hit = make_request(method, "/users/42");
-        if (method != http::verb::get) {
+        if (method != http::verb::get)
+        {
             hit.body() = "body";
         }
         const auto selected = apigate::select_http_upstream(config, hit);
-        if (selected) {
+        if (selected)
+        {
             EXPECT_EQ(selected->upstream.timeout_ms, 100U);
-        } else {
+        }
+        else
+        {
             FAIL() << "expected a matching route";
         }
     }
@@ -261,12 +293,14 @@ TEST(HttpHandlerTest, RouteModeMissesStayLocalAndProtocolErrorsStayConsistent) {
     upgrade.set(http::field::upgrade, "websocket");
     for (const auto& request :
          {invalid_get, upgrade, make_request(http::verb::get, "http://example.test/users"),
-          make_request(http::verb::get, "/users#fragment")}) {
+          make_request(http::verb::get, "/users#fragment")})
+    {
         EXPECT_FALSE(apigate::select_http_upstream(config, request).has_value());
         EXPECT_EQ(apigate::handle_http_request(config, request).result(),
                   http::status::bad_request);
     }
-    for (const auto method : {http::verb::head, http::verb::delete_, http::verb::options}) {
+    for (const auto method : {http::verb::head, http::verb::delete_, http::verb::options})
+    {
         const auto request = make_request(method, "/users");
         EXPECT_FALSE(apigate::select_http_upstream(config, request).has_value());
         EXPECT_EQ(apigate::handle_http_request(config, request).result(),
@@ -275,11 +309,14 @@ TEST(HttpHandlerTest, RouteModeMissesStayLocalAndProtocolErrorsStayConsistent) {
     const auto legacy = proxy_config();
     const auto selected =
         apigate::select_http_upstream(legacy, make_request(http::verb::post, "/any"));
-    if (legacy.upstream && selected) {
+    if (legacy.upstream && selected)
+    {
         EXPECT_EQ(&selected->upstream, &*legacy.upstream);
         EXPECT_TRUE(selected->prefix.empty());
         EXPECT_FALSE(selected->strip_prefix);
-    } else {
+    }
+    else
+    {
         FAIL() << "legacy fixture requires an upstream";
     }
 }

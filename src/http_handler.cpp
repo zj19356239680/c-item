@@ -5,31 +5,38 @@
 #include <string>
 #include <string_view>
 
-namespace apigate {
-namespace {
+namespace apigate
+{
+namespace
+{
 
 namespace http = boost::beast::http;
 
-[[nodiscard]] std::string_view request_path(std::string_view target) noexcept {
+[[nodiscard]] std::string_view request_path(std::string_view target) noexcept
+{
     const auto query_position = target.find('?');
     return target.substr(0, query_position);
 }
 
-[[nodiscard]] bool is_supported_proxy_target(std::string_view target) noexcept {
+[[nodiscard]] bool is_supported_proxy_target(std::string_view target) noexcept
+{
     return !target.empty() && target.front() == '/' && target.find('#') == std::string_view::npos;
 }
 
-[[nodiscard]] bool requests_upgrade(const HttpRequest& request) noexcept {
+[[nodiscard]] bool requests_upgrade(const HttpRequest& request) noexcept
+{
     return request.find(http::field::upgrade) != request.end();
 }
 
-[[nodiscard]] bool is_supported_proxy_method(http::verb method) noexcept {
+[[nodiscard]] bool is_supported_proxy_method(http::verb method) noexcept
+{
     return method == http::verb::get || method == http::verb::post || method == http::verb::put ||
            method == http::verb::patch;
 }
 
 [[nodiscard]] HttpResponse make_json_response(const HttpRequest& request, http::status status,
-                                              const nlohmann::json& body) {
+                                              const nlohmann::json& body)
+{
     HttpResponse response{status, request.version()};
     response.set(http::field::server, "ApiGate");
     response.set(http::field::content_type, "application/json");
@@ -40,7 +47,8 @@ namespace http = boost::beast::http;
     return response;
 }
 
-[[nodiscard]] HttpResponse make_method_not_allowed(const HttpRequest& request, bool proxy_enabled) {
+[[nodiscard]] HttpResponse make_method_not_allowed(const HttpRequest& request, bool proxy_enabled)
+{
     const std::string_view allowed = proxy_enabled ? "GET, POST, PUT, PATCH" : "GET";
     const std::string_view message =
         proxy_enabled ? "method is not supported" : "only GET is supported";
@@ -53,44 +61,55 @@ namespace http = boost::beast::http;
 
 }  // namespace
 
-std::string_view classify_http_route(std::string_view target) noexcept {
+std::string_view classify_http_route(std::string_view target) noexcept
+{
     const auto path = request_path(target);
-    if (path == "/healthz") {
+    if (path == "/healthz")
+    {
         return "healthz";
     }
-    if (path == "/readyz") {
+    if (path == "/readyz")
+    {
         return "readyz";
     }
     return "unmatched";
 }
 
-bool should_proxy_http_request(const AppConfig& config, const HttpRequest& request) noexcept {
+bool should_proxy_http_request(const AppConfig& config, const HttpRequest& request) noexcept
+{
     return select_http_upstream(config, request).has_value();
 }
 
 std::optional<SelectedUpstream> select_http_upstream(const AppConfig& config,
-                                                     const HttpRequest& request) noexcept {
-    if (!is_supported_proxy_method(request.method())) {
+                                                     const HttpRequest& request) noexcept
+{
+    if (!is_supported_proxy_method(request.method()))
+    {
         return std::nullopt;
     }
     const std::string_view target{request.target().data(), request.target().size()};
-    if (classify_http_route(target) != "unmatched") {
+    if (classify_http_route(target) != "unmatched")
+    {
         return std::nullopt;
     }
     if (!is_supported_proxy_target(target) || requests_upgrade(request) ||
-        (request.method() == http::verb::get && !request.body().empty())) {
+        (request.method() == http::verb::get && !request.body().empty()))
+    {
         return std::nullopt;
     }
-    if (config.upstream) {
+    if (config.upstream)
+    {
         return SelectedUpstream{*config.upstream, {}, false};
     }
     const auto path = request_path(target);
     std::optional<SelectedUpstream> selected;
     std::size_t longest = 0;
-    for (const auto& route : config.routes) {
+    for (const auto& route : config.routes)
+    {
         const auto& prefix = route.prefix;
         if (prefix.size() > longest && path.starts_with(prefix) &&
-            (prefix == "/" || path.size() == prefix.size() || path[prefix.size()] == '/')) {
+            (prefix == "/" || path.size() == prefix.size() || path[prefix.size()] == '/'))
+        {
             selected.emplace(SelectedUpstream{route.upstream, route.prefix, route.strip_prefix});
             longest = prefix.size();
         }
@@ -98,35 +117,43 @@ std::optional<SelectedUpstream> select_http_upstream(const AppConfig& config,
     return selected;
 }
 
-HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& request) {
+HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& request)
+{
     const std::string_view target{request.target().data(), request.target().size()};
     const auto route = classify_http_route(target);
     const bool proxy_enabled = config.upstream.has_value() || !config.routes.empty();
-    if (route != "unmatched" && request.method() != http::verb::get) {
+    if (route != "unmatched" && request.method() != http::verb::get)
+    {
         return make_method_not_allowed(request, false);
     }
-    if (!is_supported_proxy_method(request.method())) {
+    if (!is_supported_proxy_method(request.method()))
+    {
         return make_method_not_allowed(request, proxy_enabled);
     }
-    if (proxy_enabled && requests_upgrade(request)) {
+    if (proxy_enabled && requests_upgrade(request))
+    {
         return make_json_response(
             request, http::status::bad_request,
             {{"error",
               {{"code", "unsupported_request"}, {"message", "request cannot be proxied"}}}});
     }
-    if (route == "healthz") {
+    if (route == "healthz")
+    {
         return make_json_response(request, http::status::ok,
                                   {{"status", "ok"}, {"service", config.service_name}});
     }
-    if (route == "readyz") {
+    if (route == "readyz")
+    {
         return make_json_response(request, http::status::ok,
                                   {{"status", "ready"}, {"service", config.service_name}});
     }
-    if (!proxy_enabled && request.method() != http::verb::get) {
+    if (!proxy_enabled && request.method() != http::verb::get)
+    {
         return make_method_not_allowed(request, false);
     }
     if (proxy_enabled && (!is_supported_proxy_target(target) ||
-                          (request.method() == http::verb::get && !request.body().empty()))) {
+                          (request.method() == http::verb::get && !request.body().empty())))
+    {
         return make_json_response(
             request, http::status::bad_request,
             {{"error",
@@ -136,19 +163,23 @@ HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& req
                               {{"error", {{"code", "not_found"}, {"message", "route not found"}}}});
 }
 
-HttpResponse make_gateway_error_response(const HttpRequest& request, GatewayFailure failure) {
-    if (failure == GatewayFailure::gateway_timeout) {
+HttpResponse make_gateway_error_response(const HttpRequest& request, GatewayFailure failure)
+{
+    if (failure == GatewayFailure::gateway_timeout)
+    {
         return make_json_response(
             request, http::status::gateway_timeout,
             {{"error", {{"code", "gateway_timeout"}, {"message", "upstream request timed out"}}}});
     }
-    if (failure == GatewayFailure::gateway_overloaded) {
+    if (failure == GatewayFailure::gateway_overloaded)
+    {
         return make_json_response(
             request, http::status::service_unavailable,
             {{"error",
               {{"code", "gateway_overloaded"}, {"message", "proxy capacity is exhausted"}}}});
     }
-    if (failure == GatewayFailure::buffer_capacity_exhausted) {
+    if (failure == GatewayFailure::buffer_capacity_exhausted)
+    {
         return make_json_response(
             request, http::status::service_unavailable,
             {{"error",

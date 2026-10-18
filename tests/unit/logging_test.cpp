@@ -5,9 +5,11 @@
 #include <nlohmann/json.hpp>
 #include <string>
 
-namespace {
+namespace
+{
 
-TEST(StructuredLoggerTest, HonorsConfiguredThreshold) {
+TEST(StructuredLoggerTest, HonorsConfiguredThreshold)
+{
     apigate::AppConfig config;
     config.log_level = apigate::LogLevel::warn;
 

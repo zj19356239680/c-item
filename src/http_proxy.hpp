@@ -17,9 +17,11 @@
 #include "apigate/http_handler.hpp"
 #include "buffer_budget.hpp"
 
-namespace apigate {
+namespace apigate
+{
 
-enum class ProxyFailureStage : std::uint8_t {
+enum class ProxyFailureStage : std::uint8_t
+{
     resolve,
     connect,
     write,
@@ -31,21 +33,25 @@ enum class ProxyFailureStage : std::uint8_t {
 
 [[nodiscard]] std::string_view to_string(ProxyFailureStage stage) noexcept;
 
-struct ProxyFailure {
+struct ProxyFailure
+{
     ProxyFailureStage stage;
     int error_code;
 };
 
-struct ProxyResult {
+struct ProxyResult
+{
     HttpResponse response;
     std::optional<ProxyFailure> failure;
     std::optional<std::uint64_t> buffer_budget_rejected_bytes;
     detail::BufferBudgetPermit body_permit;
 };
 
-namespace detail {
+namespace detail
+{
 
-class ProxyCompletionState {
+class ProxyCompletionState
+{
    public:
     [[nodiscard]] bool claim() noexcept;
 
@@ -55,14 +61,19 @@ class ProxyCompletionState {
 
 template <typename HandlerAction, typename CleanupAction, typename AbortAction>
 void run_proxy_handler_action(ProxyCompletionState& state, HandlerAction&& handler,
-                              CleanupAction&& cleanup, AbortAction&& abort) noexcept {
+                              CleanupAction&& cleanup, AbortAction&& abort) noexcept
+{
     static_assert(std::is_nothrow_invocable_v<CleanupAction&&>);
     static_assert(std::is_nothrow_invocable_v<AbortAction&&>);
 
-    try {
+    try
+    {
         std::forward<HandlerAction>(handler)();
-    } catch (...) {
-        if (!state.claim()) {
+    }
+    catch (...)
+    {
+        if (!state.claim())
+        {
             return;
         }
         std::forward<CleanupAction>(cleanup)();
@@ -72,15 +83,20 @@ void run_proxy_handler_action(ProxyCompletionState& state, HandlerAction&& handl
 
 template <typename CompletionAction, typename AbortAction>
 void run_proxy_completion_action(ProxyCompletionState& state, CompletionAction&& complete,
-                                 AbortAction&& abort) noexcept {
+                                 AbortAction&& abort) noexcept
+{
     static_assert(std::is_nothrow_invocable_v<AbortAction&&>);
 
-    if (!state.claim()) {
+    if (!state.claim())
+    {
         return;
     }
-    try {
+    try
+    {
         std::forward<CompletionAction>(complete)();
-    } catch (...) {
+    }
+    catch (...)
+    {
         std::forward<AbortAction>(abort)();
     }
 }
@@ -93,7 +109,8 @@ void run_proxy_completion_action(ProxyCompletionState& state, CompletionAction&&
 
 }  // namespace detail
 
-class HttpProxyExchange : public std::enable_shared_from_this<HttpProxyExchange> {
+class HttpProxyExchange : public std::enable_shared_from_this<HttpProxyExchange>
+{
    public:
     using CompletionCallback = std::function<void(ProxyResult)>;
     using AbortCallback = std::function<void()>;

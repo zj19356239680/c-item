@@ -16,78 +16,114 @@
 #include "apigate/logging.hpp"
 #include "http_server_internal.hpp"
 
-namespace apigate {
-namespace {
+namespace apigate
+{
+namespace
+{
 
-void write_application_fallback(const char* event, int error_code) noexcept {
+void write_application_fallback(const char* event, int error_code) noexcept
+{
     if (std::fprintf(stderr, R"({"level":"error","payload":{"event":"%s","error_code":%d}}%c)",
-                     event, error_code, 10) < 0) {
+                     event, error_code, 10) < 0)
+    {
         std::clearerr(stderr);
     }
 }
 
 }  // namespace
 
-class Application::Impl {
+class Application::Impl
+{
    public:
     Impl(const AppConfig& config, StructuredLogger& logger)
         : config_(config),
           logger_(logger),
           signals_(io_context_, SIGINT, SIGTERM),
           server_(
-              io_context_, config_, logger_, [this]() noexcept { on_runtime_failure(); },
-              [this]() noexcept { on_drain_complete(); }) {}
+              io_context_, config_, logger_,
+              [this]() noexcept
+              {
+                  on_runtime_failure();
+              },
+              [this]() noexcept
+              {
+                  on_drain_complete();
+              })
+    {
+    }
 
-    [[nodiscard]] int run() {
-        try {
+    [[nodiscard]] int run()
+    {
+        try
+        {
             server_.start();
-        } catch (const boost::system::system_error& error) {
+        }
+        catch (const boost::system::system_error& error)
+        {
             safe_critical("http_server_start_failed", error.code().value());
             return EXIT_FAILURE;
         }
 
-        if (!arm_signal_wait()) {
+        if (!arm_signal_wait())
+        {
             return exit_code_;
         }
 
-        safe_info("service_started", [this] {
-            return nlohmann::json{{"listen_address", config_.listen_address},
-                                  {"listen_port", server_.bound_port()}};
-        });
+        safe_info("service_started",
+                  [this]
+                  {
+                      return nlohmann::json{{"listen_address", config_.listen_address},
+                                            {"listen_port", server_.bound_port()}};
+                  });
         const auto handlers_executed = io_context_.run();
-        safe_info("service_stopped", [this, handlers_executed] {
-            return nlohmann::json{{"exit_code", exit_code_},
-                                  {"handlers_executed", handlers_executed}};
-        });
+        safe_info("service_stopped",
+                  [this, handlers_executed]
+                  {
+                      return nlohmann::json{{"exit_code", exit_code_},
+                                            {"handlers_executed", handlers_executed}};
+                  });
         return exit_code_;
     }
 
    private:
-    [[nodiscard]] bool arm_signal_wait() noexcept {
-        try {
+    [[nodiscard]] bool arm_signal_wait() noexcept
+    {
+        try
+        {
             signals_.async_wait(
-                [this](const boost::system::error_code& error, int signal_number) noexcept {
+                [this](const boost::system::error_code& error, int signal_number) noexcept
+                {
                     on_signal(error, signal_number);
                 });
             return true;
-        } catch (const boost::system::system_error& error) {
+        }
+        catch (const boost::system::system_error& error)
+        {
             fail_signal_wait(error.code().value());
-        } catch (...) {
+        }
+        catch (...)
+        {
             fail_signal_wait(0);
         }
         return false;
     }
 
-    void on_signal(const boost::system::error_code& error, int signal_number) noexcept {
-        switch (shutdown_signal_state_.on_wait_completion(error)) {
+    void on_signal(const boost::system::error_code& error, int signal_number) noexcept
+    {
+        switch (shutdown_signal_state_.on_wait_completion(error))
+        {
             case detail::ShutdownSignalDisposition::begin_drain:
                 // Re-arm before doing any other work so a second signal can be queued
                 // throughout logging and drain startup.
-                if (!arm_signal_wait()) {
+                if (!arm_signal_wait())
+                {
                     return;
                 }
                 safe_info("shutdown_signal_received",
-                          [signal_number] { return nlohmann::json{{"signal", signal_number}}; });
+                          [signal_number]
+                          {
+                              return nlohmann::json{{"signal", signal_number}};
+                          });
                 server_.begin_drain();
                 return;
             case detail::ShutdownSignalDisposition::force_stop:
@@ -101,7 +137,8 @@ class Application::Impl {
         }
     }
 
-    void fail_signal_wait(int error_code) noexcept {
+    void fail_signal_wait(int error_code) noexcept
+    {
         shutdown_signal_state_.mark_completed();
         safe_critical("signal_wait_failed", error_code);
         exit_code_ = EXIT_FAILURE;
@@ -109,19 +146,26 @@ class Application::Impl {
         io_context_.stop();
     }
 
-    void on_runtime_failure() noexcept {
+    void on_runtime_failure() noexcept
+    {
         shutdown_signal_state_.mark_completed();
         exit_code_ = EXIT_FAILURE;
         io_context_.stop();
     }
 
-    void on_drain_complete() noexcept {
+    void on_drain_complete() noexcept
+    {
         shutdown_signal_state_.mark_completed();
-        try {
+        try
+        {
             signals_.cancel();
-        } catch (const boost::system::system_error& error) {
+        }
+        catch (const boost::system::system_error& error)
+        {
             fail_signal_wait(error.code().value());
-        } catch (...) {
+        }
+        catch (...)
+        {
             fail_signal_wait(0);
         }
         // HttpServer has released its final asynchronous work. The single io_context
@@ -130,18 +174,26 @@ class Application::Impl {
     }
 
     template <typename FieldsFactory>
-    void safe_info(std::string_view event, FieldsFactory&& make_fields) noexcept {
-        try {
+    void safe_info(std::string_view event, FieldsFactory&& make_fields) noexcept
+    {
+        try
+        {
             logger_.info(event, std::forward<FieldsFactory>(make_fields)());
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_application_fallback("application_info_log_failed", 0);
         }
     }
 
-    void safe_critical(std::string_view event, int error_code) noexcept {
-        try {
+    void safe_critical(std::string_view event, int error_code) noexcept
+    {
+        try
+        {
             logger_.critical(event, {{"error_code", error_code}});
-        } catch (...) {
+        }
+        catch (...)
+        {
             write_application_fallback("application_critical_log_failed", error_code);
         }
     }
@@ -156,10 +208,15 @@ class Application::Impl {
 };
 
 Application::Application(const AppConfig& config, StructuredLogger& logger)
-    : impl_(std::make_unique<Impl>(config, logger)) {}
+    : impl_(std::make_unique<Impl>(config, logger))
+{
+}
 
 Application::~Application() = default;
 
-int Application::run() { return impl_->run(); }
+int Application::run()
+{
+    return impl_->run();
+}
 
 }  // namespace apigate
