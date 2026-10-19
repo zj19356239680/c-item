@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string_view>
 
 #include "apigate/config.hpp"
@@ -36,8 +37,18 @@ struct SelectedUpstream
     std::optional<std::size_t> route_index{std::nullopt};
 };
 
-[[nodiscard]] std::optional<SelectedUpstream> select_http_upstream(
-    const AppConfig& config, const HttpRequest& request) noexcept;
+// Matches a route without selecting a backend or advancing any runtime state.
+// Views remain valid while the immutable AppConfig remains alive.
+struct SelectedRoute
+{
+    std::span<const UpstreamConfig> upstreams;
+    std::string_view prefix;
+    bool strip_prefix{false};
+    std::optional<std::size_t> route_index{std::nullopt};
+};
+
+[[nodiscard]] std::optional<SelectedRoute> select_http_route(const AppConfig& config,
+                                                             const HttpRequest& request) noexcept;
 [[nodiscard]] HttpResponse make_gateway_error_response(const HttpRequest& request,
                                                        GatewayFailure failure);
 [[nodiscard]] HttpResponse make_rate_limited_response(const HttpRequest& request,

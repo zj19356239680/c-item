@@ -37,7 +37,7 @@ struct RateLimitConfig
 struct RouteConfig
 {
     std::string prefix;
-    UpstreamConfig upstream;
+    std::vector<UpstreamConfig> upstreams;
     bool strip_prefix{false};
     std::optional<RateLimitConfig> rate_limit{std::nullopt};
 };

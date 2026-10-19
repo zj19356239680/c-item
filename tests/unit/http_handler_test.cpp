@@ -233,10 +233,10 @@ TEST(HttpHandlerTest, CreatesSafeGatewayErrors)
 TEST(HttpHandlerTest, SelectsLongestRawPathOnSegmentBoundariesRegardlessOfOrder)
 {
     apigate::AppConfig config;
-    config.routes = {{"/users", {"users", 8001, 100}},
-                     {"/users/admin", {"admins", 8002, 200}},
-                     {"/orders", {"orders", 8003, 300}},
-                     {"/", {"fallback", 8004, 400}}};
+    config.routes = {{"/users", {{"users", 8001, 100}}},
+                     {"/users/admin", {{"admins", 8002, 200}}},
+                     {"/orders", {{"orders", 8003, 300}}},
+                     {"/", {{"fallback", 8004, 400}}}};
     const std::pair<const char*, const char*> cases[] = {
         {"/users", "users"},
         {"/users/42?next=/orders", "users"},
@@ -256,10 +256,11 @@ TEST(HttpHandlerTest, SelectsLongestRawPathOnSegmentBoundariesRegardlessOfOrder)
         for (const auto& [target, host] : cases)
         {
             const auto request = make_request(http::verb::get, target);
-            const auto selected = apigate::select_http_upstream(config, request);
+            const auto selected = apigate::select_http_route(config, request);
             if (selected)
             {
-                EXPECT_EQ(selected->upstream.host, host);
+                ASSERT_EQ(selected->upstreams.size(), 1U);
+                EXPECT_EQ(selected->upstreams.front().host, host);
             }
             else
             {
@@ -271,7 +272,7 @@ TEST(HttpHandlerTest, SelectsLongestRawPathOnSegmentBoundariesRegardlessOfOrder)
     for (const char* target : {"/healthz?x", "/readyz"})
     {
         const auto request = make_request(http::verb::get, target);
-        EXPECT_FALSE(apigate::select_http_upstream(config, request).has_value());
+        EXPECT_FALSE(apigate::select_http_route(config, request).has_value());
         EXPECT_EQ(apigate::handle_http_request(config, request).result(), http::status::ok);
     }
 }
@@ -279,7 +280,7 @@ TEST(HttpHandlerTest, SelectsLongestRawPathOnSegmentBoundariesRegardlessOfOrder)
 TEST(HttpHandlerTest, RouteModeMissesStayLocalAndProtocolErrorsStayConsistent)
 {
     apigate::AppConfig config;
-    config.routes = {{"/users", {"users", 8001, 100}}};
+    config.routes = {{"/users", {{"users", 8001, 100}}}};
     for (const auto method :
          {http::verb::get, http::verb::post, http::verb::put, http::verb::patch})
     {
@@ -291,10 +292,11 @@ TEST(HttpHandlerTest, RouteModeMissesStayLocalAndProtocolErrorsStayConsistent)
         {
             hit.body() = "body";
         }
-        const auto selected = apigate::select_http_upstream(config, hit);
+        const auto selected = apigate::select_http_route(config, hit);
         if (selected)
         {
-            EXPECT_EQ(selected->upstream.timeout_ms, 100U);
+            ASSERT_EQ(selected->upstreams.size(), 1U);
+            EXPECT_EQ(selected->upstreams.front().timeout_ms, 100U);
         }
         else
         {
@@ -309,23 +311,24 @@ TEST(HttpHandlerTest, RouteModeMissesStayLocalAndProtocolErrorsStayConsistent)
          {invalid_get, upgrade, make_request(http::verb::get, "http://example.test/users"),
           make_request(http::verb::get, "/users#fragment")})
     {
-        EXPECT_FALSE(apigate::select_http_upstream(config, request).has_value());
+        EXPECT_FALSE(apigate::select_http_route(config, request).has_value());
         EXPECT_EQ(apigate::handle_http_request(config, request).result(),
                   http::status::bad_request);
     }
     for (const auto method : {http::verb::head, http::verb::delete_, http::verb::options})
     {
         const auto request = make_request(method, "/users");
-        EXPECT_FALSE(apigate::select_http_upstream(config, request).has_value());
+        EXPECT_FALSE(apigate::select_http_route(config, request).has_value());
         EXPECT_EQ(apigate::handle_http_request(config, request).result(),
                   http::status::method_not_allowed);
     }
     const auto legacy = proxy_config();
     const auto selected =
-        apigate::select_http_upstream(legacy, make_request(http::verb::post, "/any"));
+        apigate::select_http_route(legacy, make_request(http::verb::post, "/any"));
     if (legacy.upstream && selected)
     {
-        EXPECT_EQ(&selected->upstream, &*legacy.upstream);
+        ASSERT_EQ(selected->upstreams.size(), 1U);
+        EXPECT_EQ(&selected->upstreams.front(), &*legacy.upstream);
         EXPECT_TRUE(selected->prefix.empty());
         EXPECT_FALSE(selected->strip_prefix);
     }

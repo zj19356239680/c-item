@@ -95,9 +95,9 @@ TEST(RouteRateLimitsTest, RoutesWithTheSameBackendHaveIndependentSharedStateAndD
 {
     const Clock::time_point now{};
     const std::vector<apigate::RouteConfig> routes = {
-        {"/a", {"same", 80}, true, apigate::RateLimitConfig{1, 1}},
-        {"/b", {"same", 80}, false, apigate::RateLimitConfig{2, 1}},
-        {"/unlimited", {"same", 80}}};
+        {"/a", {{"same", 80}}, true, apigate::RateLimitConfig{1, 1}},
+        {"/b", {{"same", 80}}, false, apigate::RateLimitConfig{2, 1}},
+        {"/unlimited", {{"same", 80}}}};
     apigate::detail::RouteRateLimits limits{routes, now};
     EXPECT_TRUE(limits.try_acquire(0, now).allowed);
     EXPECT_FALSE(limits.try_acquire(0, now).allowed);

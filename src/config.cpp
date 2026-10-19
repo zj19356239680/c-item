@@ -269,6 +269,35 @@ void validate_route_prefix(std::string_view prefix)
     return number;
 }
 
+[[nodiscard]] UpstreamConfig parse_route_upstream(const nlohmann::json& entry)
+{
+    if (!entry.is_object() || !entry.contains("host") || !entry.contains("port") ||
+        !entry.at("host").is_string())
+    {
+        throw ConfigError("APIGATE_ROUTES upstream requires string host and integer port");
+    }
+    const auto host = entry.at("host").get<std::string>();
+    std::string validated_host;
+    try
+    {
+        if (host.empty())
+        {
+            throw ConfigError("empty host");
+        }
+        validated_host = parse_upstream_host(host);
+    }
+    catch (const ConfigError&)
+    {
+        throw ConfigError("APIGATE_ROUTES host must be a valid hostname or IP address");
+    }
+    const auto port = static_cast<std::uint16_t>(route_integer(entry.at("port"), 65535));
+    const auto timeout =
+        entry.contains("timeout_ms")
+            ? static_cast<std::uint32_t>(route_integer(entry.at("timeout_ms"), 60000))
+            : 3000U;
+    return {std::move(validated_host), port, timeout};
+}
+
 [[nodiscard]] std::vector<RouteConfig> parse_routes(std::string_view value)
 {
     if (value.size() > std::size_t{64} * 1024)
@@ -276,15 +305,26 @@ void validate_route_prefix(std::string_view prefix)
         throw ConfigError("APIGATE_ROUTES must not exceed 65536 bytes");
     }
     using Json = nlohmann::json;
-    std::array<std::set<std::string>, 2> keys;
+    std::array<std::set<std::string>, 3> keys;
     std::string route_key;
     std::size_t object_count = 0;
-    const auto callback =
-        [&keys, &route_key, &object_count](int depth, Json::parse_event_t event, Json& parsed)
+    std::size_t upstream_count = 0;
+    bool in_upstreams = false;
+    const auto callback = [&keys, &route_key, &object_count, &upstream_count, &in_upstreams](
+                              int depth, Json::parse_event_t event, Json& parsed)
     {
         if (event == Json::parse_event_t::array_start && depth != 0)
         {
-            throw ConfigError("APIGATE_ROUTES must be an array of route objects");
+            if (depth != 2 || route_key != "upstreams")
+            {
+                throw ConfigError("APIGATE_ROUTES contains an invalid nested array");
+            }
+            upstream_count = 0;
+            in_upstreams = true;
+        }
+        if (event == Json::parse_event_t::array_end && depth == 2)
+        {
+            in_upstreams = false;
         }
         if (event == Json::parse_event_t::object_start)
         {
@@ -300,6 +340,14 @@ void validate_route_prefix(std::string_view prefix)
             {
                 keys[1].clear();
             }
+            else if (depth == 3 && in_upstreams && route_key == "upstreams")
+            {
+                if (++upstream_count > 16)
+                {
+                    throw ConfigError("APIGATE_ROUTES upstreams must contain at most 16 entries");
+                }
+                keys[2].clear();
+            }
             else
             {
                 throw ConfigError("APIGATE_ROUTES contains an invalid nested object");
@@ -307,7 +355,7 @@ void validate_route_prefix(std::string_view prefix)
         }
         if (event == Json::parse_event_t::key)
         {
-            if (depth < 2 || depth > 3 ||
+            if (depth < 2 || depth > 4 ||
                 !keys.at(static_cast<std::size_t>(depth - 2))
                      .insert(parsed.get<std::string>())
                      .second)
@@ -338,23 +386,22 @@ void validate_route_prefix(std::string_view prefix)
     std::set<std::string> prefixes;
     for (const auto& entry : document)
     {
-        if (!entry.is_object() || !entry.contains("prefix") || !entry.contains("host") ||
-            !entry.contains("port"))
+        if (!entry.is_object() || !entry.contains("prefix"))
         {
-            throw ConfigError("APIGATE_ROUTES entry requires prefix, host and port");
+            throw ConfigError("APIGATE_ROUTES entry requires prefix and an upstream configuration");
         }
         for (const auto& item : entry.items())
         {
             if (item.key() != "prefix" && item.key() != "host" && item.key() != "port" &&
                 item.key() != "timeout_ms" && item.key() != "strip_prefix" &&
-                item.key() != "rate_limit")
+                item.key() != "rate_limit" && item.key() != "upstreams")
             {
                 throw ConfigError("APIGATE_ROUTES entry contains an unknown field");
             }
         }
-        if (!entry.at("prefix").is_string() || !entry.at("host").is_string())
+        if (!entry.at("prefix").is_string())
         {
-            throw ConfigError("APIGATE_ROUTES prefix and host must be strings");
+            throw ConfigError("APIGATE_ROUTES prefix must be a string");
         }
         auto prefix = entry.at("prefix").get<std::string>();
         validate_route_prefix(prefix);
@@ -362,25 +409,40 @@ void validate_route_prefix(std::string_view prefix)
         {
             throw ConfigError("APIGATE_ROUTES contains a duplicate prefix");
         }
-        const auto host = entry.at("host").get<std::string>();
-        std::string validated_host;
-        try
+        std::vector<UpstreamConfig> upstreams;
+        if (entry.contains("upstreams"))
         {
-            if (host.empty())
+            if (entry.contains("host") || entry.contains("port") || entry.contains("timeout_ms"))
             {
-                throw ConfigError("empty host");
+                throw ConfigError(
+                    "APIGATE_ROUTES upstreams conflicts with route-level upstream fields");
             }
-            validated_host = parse_upstream_host(host);
+            const auto& pool = entry.at("upstreams");
+            if (!pool.is_array() || pool.empty() || pool.size() > 16)
+            {
+                throw ConfigError("APIGATE_ROUTES upstreams must contain 1-16 upstream objects");
+            }
+            for (const auto& backend : pool)
+            {
+                if (!backend.is_object())
+                {
+                    throw ConfigError("APIGATE_ROUTES upstream entry must be an object");
+                }
+                for (const auto& item : backend.items())
+                {
+                    if (item.key() != "host" && item.key() != "port" && item.key() != "timeout_ms")
+                    {
+                        throw ConfigError(
+                            "APIGATE_ROUTES upstream entry contains an unknown field");
+                    }
+                }
+                upstreams.push_back(parse_route_upstream(backend));
+            }
         }
-        catch (const ConfigError&)
+        else
         {
-            throw ConfigError("APIGATE_ROUTES host must be a valid hostname or IP address");
+            upstreams.push_back(parse_route_upstream(entry));
         }
-        const auto port = static_cast<std::uint16_t>(route_integer(entry.at("port"), 65535));
-        const auto timeout =
-            entry.contains("timeout_ms")
-                ? static_cast<std::uint32_t>(route_integer(entry.at("timeout_ms"), 60000))
-                : 3000U;
         if (entry.contains("strip_prefix") && !entry.at("strip_prefix").is_boolean())
         {
             throw ConfigError("APIGATE_ROUTES strip_prefix must be a boolean");
@@ -400,10 +462,7 @@ void validate_route_prefix(std::string_view prefix)
                 static_cast<std::uint32_t>(route_integer(limit.at("requests_per_second"), 1000000)),
                 static_cast<std::uint32_t>(route_integer(limit.at("burst"), 1000000))};
         }
-        routes.push_back({std::move(prefix),
-                          {std::move(validated_host), port, timeout},
-                          strip_prefix,
-                          rate_limit});
+        routes.push_back({std::move(prefix), std::move(upstreams), strip_prefix, rate_limit});
     }
     return routes;
 }

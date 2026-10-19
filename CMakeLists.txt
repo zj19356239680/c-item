@@ -50,6 +50,7 @@ add_library(apigate_core
     src/http_proxy.cpp
     src/http_server.cpp
     src/rate_limit.cpp
+    src/route_proxy_admission.cpp
     src/logging.cpp)
 target_include_directories(apigate_core PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -76,6 +77,7 @@ if(BUILD_TESTING)
         tests/unit/http_proxy_test.cpp
         tests/unit/http_server_test.cpp
         tests/unit/rate_limit_test.cpp
+        tests/unit/route_proxy_admission_test.cpp
         tests/unit/logging_test.cpp)
     target_include_directories(apigate_unit_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(apigate_unit_tests PRIVATE apigate_core GTest::gtest_main)
@@ -126,6 +128,10 @@ if(BUILD_TESTING)
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/rate_limit_test.py
                 $<TARGET_FILE:api-gate>)
     set_tests_properties(integration.rate_limit PROPERTIES TIMEOUT 20)
+    add_test(NAME integration.load_balance
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/load_balance_test.py
+                $<TARGET_FILE:api-gate>)
+    set_tests_properties(integration.load_balance PROPERTIES TIMEOUT 30)
     add_test(NAME integration.capacity_baseline_smoke
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/capacity-baseline.py
                 $<TARGET_FILE:api-gate> --smoke)

@@ -77,11 +77,11 @@ std::string_view classify_http_route(std::string_view target) noexcept
 
 bool should_proxy_http_request(const AppConfig& config, const HttpRequest& request) noexcept
 {
-    return select_http_upstream(config, request).has_value();
+    return select_http_route(config, request).has_value();
 }
 
-std::optional<SelectedUpstream> select_http_upstream(const AppConfig& config,
-                                                     const HttpRequest& request) noexcept
+std::optional<SelectedRoute> select_http_route(const AppConfig& config,
+                                               const HttpRequest& request) noexcept
 {
     if (!is_supported_proxy_method(request.method()))
     {
@@ -99,10 +99,10 @@ std::optional<SelectedUpstream> select_http_upstream(const AppConfig& config,
     }
     if (config.upstream)
     {
-        return SelectedUpstream{*config.upstream, {}, false};
+        return SelectedRoute{{&*config.upstream, 1}, {}, false};
     }
     const auto path = request_path(target);
-    std::optional<SelectedUpstream> selected;
+    std::optional<SelectedRoute> selected;
     std::size_t longest = 0;
     for (std::size_t index = 0; index < config.routes.size(); ++index)
     {
@@ -112,7 +112,7 @@ std::optional<SelectedUpstream> select_http_upstream(const AppConfig& config,
             (prefix == "/" || path.size() == prefix.size() || path[prefix.size()] == '/'))
         {
             selected.emplace(
-                SelectedUpstream{route.upstream, route.prefix, route.strip_prefix, index});
+                SelectedRoute{route.upstreams, route.prefix, route.strip_prefix, index});
             longest = prefix.size();
         }
     }

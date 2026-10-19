@@ -72,11 +72,127 @@ TEST_F(ConfigTest, ParsesStaticRoutesWithDefaultsAndBoundaries)
     EXPECT_EQ(config.routes[0].prefix, "/");
     EXPECT_FALSE(config.routes[0].strip_prefix);
     EXPECT_FALSE(config.routes[0].rate_limit.has_value());
-    EXPECT_EQ(config.routes[0].upstream.timeout_ms, 3000U);
-    EXPECT_EQ(config.routes[1].upstream.host, "::1");
-    EXPECT_EQ(config.routes[1].upstream.port, 65535);
-    EXPECT_EQ(config.routes[1].upstream.timeout_ms, 60000U);
-    EXPECT_EQ(config.routes[2].upstream.timeout_ms, 1U);
+    ASSERT_EQ(config.routes[0].upstreams.size(), 1U);
+    ASSERT_EQ(config.routes[1].upstreams.size(), 1U);
+    ASSERT_EQ(config.routes[2].upstreams.size(), 1U);
+    EXPECT_EQ(config.routes[0].upstreams.front().timeout_ms, 3000U);
+    EXPECT_EQ(config.routes[1].upstreams.front().host, "::1");
+    EXPECT_EQ(config.routes[1].upstreams.front().port, 65535);
+    EXPECT_EQ(config.routes[1].upstreams.front().timeout_ms, 60000U);
+    EXPECT_EQ(config.routes[2].upstreams.front().timeout_ms, 1U);
+}
+
+TEST_F(ConfigTest, ParsesUpstreamPoolsWithDefaultsAndPreservesDuplicateAddressSlots)
+{
+    const auto raw =
+        R"([{"prefix":"/a","strip_prefix":true,"rate_limit":{"requests_per_second":10,"burst":20},
+        "upstreams":[{"host":"::1","port":1},{"host":"::1","port":1,"timeout_ms":60000},
+        {"host":"127.0.0.1","port":65535,"timeout_ms":1}]}])";
+    ASSERT_EQ(setenv("APIGATE_ROUTES", raw, 1), 0);
+    const auto config = apigate::load_config_from_environment();
+    ASSERT_EQ(config.routes.size(), 1U);
+    const auto& route = config.routes.front();
+    ASSERT_EQ(route.upstreams.size(), 3U);
+    EXPECT_TRUE(route.strip_prefix);
+    EXPECT_TRUE(route.rate_limit.has_value());
+    EXPECT_EQ(route.upstreams[0].host, "::1");
+    EXPECT_EQ(route.upstreams[0].port, 1);
+    EXPECT_EQ(route.upstreams[0].timeout_ms, 3000U);
+    EXPECT_EQ(route.upstreams[1].timeout_ms, 60000U);
+    EXPECT_EQ(route.upstreams[2].port, 65535);
+    EXPECT_EQ(route.upstreams[2].timeout_ms, 1U);
+}
+
+TEST_F(ConfigTest, EnforcesPoolRouteAndRawSizeLimitsTogether)
+{
+    auto pool = nlohmann::json::array();
+    for (int slot = 0; slot < 16; ++slot)
+    {
+        pool.push_back({{"host", "h"}, {"port", 1}});
+    }
+    auto entries = nlohmann::json::array();
+    for (int route = 0; route < 32; ++route)
+    {
+        entries.push_back({{"prefix", "/p" + std::to_string(route)},
+                           {"upstreams", pool},
+                           {"rate_limit", {{"requests_per_second", 1}, {"burst", 1}}}});
+    }
+    auto raw = entries.dump();
+    raw.resize(std::size_t{64} * 1024, ' ');
+    ASSERT_EQ(setenv("APIGATE_ROUTES", raw.c_str(), 1), 0);
+    const auto config = apigate::load_config_from_environment();
+    ASSERT_EQ(config.routes.size(), 32U);
+    EXPECT_EQ(config.routes.back().upstreams.size(), 16U);
+    raw.push_back(' ');
+    ASSERT_EQ(setenv("APIGATE_ROUTES", raw.c_str(), 1), 0);
+    EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()), apigate::ConfigError);
+    entries.push_back({{"prefix", "/extra"}, {"upstreams", pool}});
+    raw = entries.dump();
+    ASSERT_EQ(setenv("APIGATE_ROUTES", raw.c_str(), 1), 0);
+    EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()), apigate::ConfigError);
+    pool.push_back({{"host", "h"}, {"port", 1}});
+    raw = nlohmann::json::array({{{"prefix", "/a"}, {"upstreams", pool}}}).dump();
+    ASSERT_EQ(setenv("APIGATE_ROUTES", raw.c_str(), 1), 0);
+    EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()), apigate::ConfigError);
+}
+
+TEST_F(ConfigTest, RejectsConflictingAndMalformedUpstreamPoolsWithoutEchoingValues)
+{
+    const auto base =
+        nlohmann::json{{"prefix", "/private-prefix"},
+                       {"upstreams", {{{"host", "private-host.test"}, {"port", 80}}}}};
+    const auto reject = [](const std::string& raw)
+    {
+        ASSERT_EQ(setenv("APIGATE_ROUTES", raw.c_str(), 1), 0);
+        try
+        {
+            static_cast<void>(apigate::load_config_from_environment());
+            FAIL() << "invalid pool accepted";
+        }
+        catch (const apigate::ConfigError& error)
+        {
+            EXPECT_EQ(std::string{error.what()}.find("private-"), std::string::npos);
+        }
+    };
+    for (const char* field : {"host", "port", "timeout_ms"})
+    {
+        auto entry = base;
+        entry[field] = nullptr;
+        reject(nlohmann::json::array({entry}).dump());
+    }
+    for (const auto& pool : nlohmann::json::array(
+             {nullptr, true, 1, "private-value", nlohmann::json::object(), nlohmann::json::array(),
+              nlohmann::json::array({nullptr}), nlohmann::json::array({nlohmann::json::array()}),
+              nlohmann::json::array({{{"host", "h"}}}), nlohmann::json::array({{{"port", 1}}}),
+              nlohmann::json::array({{{"host", "h"}, {"port", 1}, {"unknown", true}}})}))
+    {
+        auto entry = base;
+        entry["upstreams"] = pool;
+        reject(nlohmann::json::array({entry}).dump());
+    }
+    for (const char* field : {"host", "port", "timeout_ms"})
+    {
+        for (const auto& value : nlohmann::json::array(
+                 {nullptr, true, 1.0, "private-value/path", -1, 0, 65536, 18446744073709551615ULL}))
+        {
+            auto entry = base;
+            entry["upstreams"][0][field] = value;
+            reject(nlohmann::json::array({entry}).dump());
+        }
+    }
+    for (
+        const char* raw :
+        {R"([{"prefix":"/a","upstreams":[{"host":"h","host":"x","port":1}]}])",
+         R"([{"prefix":"/a","upstreams":[{"host":"h","port":1,"port":2}]}])",
+         R"([{"prefix":"/a","upstreams":[{"host":"h","port":1,"timeout_ms":1,"timeout_ms":2}]}])",
+         R"([{"prefix":"/a","upstreams":[{"host":"h","\u0068ost":"x","port":1}]}])",
+         R"([{"prefix":"/a","upstreams":[{"host":"h","port":1}],"upstreams":[{"host":"x","port":2}]}])",
+         R"([{"prefix":"/a","upstreams":[{"host":{"nested":1},"port":1}]}])",
+         R"([{"prefix":"/a","upstreams":[{"host":"h","port":[1]}]}])",
+         R"([{"prefix":"/a","upstreams":[{"host":"h","port":1}],"prefix":"/b"}])"})
+    {
+        reject(raw);
+    }
 }
 
 TEST_F(ConfigTest, AcceptsOnlyBooleanStripPrefixAndRejectsDuplicates)

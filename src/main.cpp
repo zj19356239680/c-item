@@ -69,7 +69,11 @@ void print_help()
         << "  APIGATE_UPSTREAM_TIMEOUT_MS Per-stage timeout in milliseconds (default: 3000)\n";
     std::cout
         << "  APIGATE_ROUTES        Optional JSON array of 1-32 static path routes (max 64 KiB);\n"
-        << "                       prefix/host/port required, timeout_ms defaults to 3000;\n"
+        << "                       prefix required; host/port with optional timeout_ms (default "
+           "3000),\n"
+        << "                       or upstreams with 1-16 host/port entries (forms exclusive);\n"
+        << "                       each timeout_ms defaults to 3000; per-route round robin, no "
+           "retry;\n"
         << "                       strip_prefix is an optional boolean (default: false);\n"
         << "                       rate_limit optionally requires requests_per_second and burst\n"
         << "                       (integers 1-1000000); omitted means unlimited;\n"

@@ -94,10 +94,10 @@ TEST(HttpProxyTest, RegeneratesZeroLengthForEmptyBodyMethods)
 TEST(HttpProxyTest, BuildsTargetsFromTheSelectedRouteWithoutChangingTheDownstreamRequest)
 {
     apigate::AppConfig config;
-    config.routes = {{"/users", {"users", 8001, 100}, true},
-                     {"/users/admin", {"admins", 8002, 200}, false},
-                     {"/orders", {"orders", 8003, 300}},
-                     {"/", {"fallback", 8004, 400}, true}};
+    config.routes = {{"/users", {{"users", 8001, 100}}, true},
+                     {"/users/admin", {{"admins", 8002, 200}}, false},
+                     {"/orders", {{"orders", 8003, 300}}},
+                     {"/", {{"fallback", 8004, 400}}, true}};
     struct TargetCase
     {
         const char* downstream;
@@ -132,13 +132,16 @@ TEST(HttpProxyTest, BuildsTargetsFromTheSelectedRouteWithoutChangingTheDownstrea
             {
                 request.body() = "unchanged-request-body";
             }
-            const auto selected = apigate::select_http_upstream(config, request);
+            const auto selected = apigate::select_http_route(config, request);
             if (!selected)
             {
                 FAIL() << "expected a matching route";
                 continue;
             }
-            const auto upstream = apigate::detail::make_upstream_request(*selected, request);
+            ASSERT_EQ(selected->upstreams.size(), 1U);
+            const apigate::SelectedUpstream backend{selected->upstreams.front(), selected->prefix,
+                                                    selected->strip_prefix};
+            const auto upstream = apigate::detail::make_upstream_request(backend, request);
             EXPECT_EQ(upstream.target(), entry.upstream);
             EXPECT_EQ(upstream[http::field::host], entry.host);
             EXPECT_EQ(upstream.method(), method);
