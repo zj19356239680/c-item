@@ -399,12 +399,7 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
         }
         if (tls_stream_)
         {
-            tls_stream_->set_verify_callback(asio::ssl::host_name_verification(config_.host));
-            boost::system::error_code address_error;
-            static_cast<void>(asio::ip::make_address(config_.host, address_error));
-            // Only configured DNS names are sent as SNI; IP hosts use IP SAN verification.
-            if (address_error &&
-                SSL_set_tlsext_host_name(tls_stream_->native_handle(), config_.host.c_str()) != 1)
+            if (!configure_upstream_tls_identity(*tls_stream_, config_.host))
             {
                 fail(ProxyFailureStage::handshake, asio::error::invalid_argument);
                 return;

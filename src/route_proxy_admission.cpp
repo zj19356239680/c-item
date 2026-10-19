@@ -9,7 +9,10 @@ namespace apigate::detail
 RouteProxyAdmission::RouteProxyAdmission(const std::vector<RouteConfig>& routes,
                                          std::shared_ptr<ProxyAdmissionState> proxies,
                                          TokenBucket::Clock::time_point now)
-    : rate_limits_(routes, now), proxies_(std::move(proxies)), next_upstream_(routes.size(), 0)
+    : rate_limits_(routes, now),
+      proxies_(std::move(proxies)),
+      next_upstream_(routes.size(), 0),
+      health_(std::make_shared<UpstreamHealthState>(routes))
 {
     if (!proxies_)
     {
@@ -47,12 +50,29 @@ RouteProxyAdmissionResult RouteProxyAdmission::try_acquire(const SelectedRoute& 
             throw std::logic_error("route upstream position is invalid");
         }
         index = next;
+        std::size_t visited = 0;
+        while (visited < route.upstreams.size() && !health_->available(*route.route_index, index))
+        {
+            index = index + 1 == route.upstreams.size() ? 0 : index + 1;
+            ++visited;
+        }
+        if (visited == route.upstreams.size())
+        {
+            result.permit.reset();
+            result.no_healthy_upstream = true;
+            return result;
+        }
         // Bounded position, not a lifetime request counter. Never roll back after selection.
-        next = next == route.upstreams.size() - 1 ? 0 : next + 1;
+        next = index == route.upstreams.size() - 1 ? 0 : index + 1;
     }
     result.upstream.emplace(SelectedUpstream{route.upstreams[index], route.prefix,
                                              route.strip_prefix, route.route_index});
     return result;
+}
+
+std::shared_ptr<UpstreamHealthState> RouteProxyAdmission::health_state() const noexcept
+{
+    return health_;
 }
 
 }  // namespace apigate::detail

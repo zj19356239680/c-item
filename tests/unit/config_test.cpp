@@ -77,6 +77,7 @@ TEST_F(ConfigTest, ParsesStaticRoutesWithDefaultsAndBoundaries)
     EXPECT_EQ(config.routes[0].prefix, "/");
     EXPECT_FALSE(config.routes[0].strip_prefix);
     EXPECT_FALSE(config.routes[0].rate_limit.has_value());
+    EXPECT_FALSE(config.routes[0].health_check.has_value());
     ASSERT_EQ(config.routes[0].upstreams.size(), 1U);
     ASSERT_EQ(config.routes[1].upstreams.size(), 1U);
     ASSERT_EQ(config.routes[2].upstreams.size(), 1U);
@@ -85,6 +86,98 @@ TEST_F(ConfigTest, ParsesStaticRoutesWithDefaultsAndBoundaries)
     EXPECT_EQ(config.routes[1].upstreams.front().port, 65535);
     EXPECT_EQ(config.routes[1].upstreams.front().timeout_ms, 60000U);
     EXPECT_EQ(config.routes[2].upstreams.front().timeout_ms, 1U);
+}
+
+TEST_F(ConfigTest, ParsesHealthChecksDefaultsAndBoundariesForBothBackendForms)
+{
+    const auto raw =
+        R"([{"prefix":"/a","host":"localhost","port":1,"health_check":{"path":"/live"}},
+        {"prefix":"/b","upstreams":[{"host":"localhost","port":1}],"health_check":{
+        "path":"/health/deep","interval_ms":100,"timeout_ms":50,"unhealthy_threshold":1,"healthy_threshold":10}},
+        {"prefix":"/c","host":"localhost","port":1,"health_check":{
+        "path":"/","interval_ms":60000,"timeout_ms":60000,"unhealthy_threshold":10,"healthy_threshold":1}}])";
+    ASSERT_EQ(setenv("APIGATE_ROUTES", raw, 1), 0);
+    const auto config = apigate::load_config_from_environment();
+    const auto& first = config.routes[0].health_check;
+    const auto& second = config.routes[1].health_check;
+    const auto& third = config.routes[2].health_check;
+    if (!first || !second || !third)
+    {
+        FAIL() << "expected all configured health checks";
+        return;
+    }
+    const auto& settings = *first;
+    EXPECT_EQ(settings.path, "/live");
+    EXPECT_EQ(settings.interval_ms, 5000U);
+    EXPECT_EQ(settings.timeout_ms, 1000U);
+    EXPECT_EQ(settings.unhealthy_threshold, 3U);
+    EXPECT_EQ(settings.healthy_threshold, 2U);
+    EXPECT_EQ(second->timeout_ms, 50U);
+    EXPECT_EQ(third->timeout_ms, 60000U);
+}
+
+TEST_F(ConfigTest, RejectsInvalidHealthObjectsFieldsPathsNumbersAndDuplicatesSafely)
+{
+    using Json = nlohmann::json;
+    const Json base{{"prefix", "/"}, {"host", "private-host.test"}, {"port", 1}};
+    const auto reject = [&base](const Json& health)
+    {
+        auto route = base;
+        route["health_check"] = health;
+        const auto raw = Json::array({route}).dump();
+        ASSERT_EQ(setenv("APIGATE_ROUTES", raw.c_str(), 1), 0);
+        try
+        {
+            static_cast<void>(apigate::load_config_from_environment());
+            FAIL() << "invalid health configuration accepted";
+        }
+        catch (const apigate::ConfigError& error)
+        {
+            EXPECT_EQ(std::string_view{error.what()}.find("private-"), std::string_view::npos);
+        }
+    };
+    for (const auto& invalid :
+         {Json{}, Json(true), Json(1), Json("private-path"), Json::array(), Json::object()})
+    {
+        reject(invalid);
+    }
+    for (const auto* path : {"", "private-path", "https://private-host.test/", "/private-path?q",
+                             "/private-path#f", "/private-path space", "/private-path\r",
+                             "/private-path\n", "/private-path\t", "/private-path\x7f"})
+    {
+        reject(Json{{"path", path}});
+    }
+    for (const auto& path : {Json{}, Json(true), Json(1), Json::array(), Json::object()})
+    {
+        reject(Json{{"path", path}});
+    }
+    for (const auto* field :
+         {"interval_ms", "timeout_ms", "unhealthy_threshold", "healthy_threshold"})
+    {
+        for (const auto& value : {Json{}, Json(true), Json(1.5), Json("1000"), Json(-1), Json(0),
+                                  Json(1000000), Json::parse("18446744073709551616")})
+        {
+            reject(Json{{"path", "/private-health"}, {field, value}});
+        }
+    }
+    reject(Json{{"path", "/private-health"}, {"interval_ms", 99}});
+    reject(Json{{"path", "/private-health"}, {"timeout_ms", 49}});
+    reject(Json{{"path", "/private-health"}, {"interval_ms", 100}, {"timeout_ms", 101}});
+    reject(Json{{"path", "/private-health"}, {"unknown", 1}});
+    for (const auto* fields :
+         {R"("path":"/private-health","path":"/private-health")",
+          R"("path":"/private-health","interval_ms":5000,"interval_ms":5000)",
+          R"("path":"/private-health","timeout_ms":1000,"timeout_ms":1000)",
+          R"("path":"/private-health","healthy_threshold":2,"healthy_threshold":2)",
+          R"("path":"/private-health","unhealthy_threshold":3,"unhealthy_threshold":3)"})
+    {
+        const auto raw =
+            std::string{R"([{"prefix":"/","host":"localhost","port":1,"health_check":{)"} + fields +
+            "}}]";
+        ASSERT_EQ(setenv("APIGATE_ROUTES", raw.c_str(), 1), 0);
+        EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()),
+                     apigate::ConfigError);
+    }
 }
 
 TEST_F(ConfigTest, ParsesSchemesWithoutPortInferenceAndEnforcesTlsPolicy)

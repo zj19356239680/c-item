@@ -177,6 +177,13 @@ HttpResponse make_rate_limited_response(const HttpRequest& request,
 
 HttpResponse make_gateway_error_response(const HttpRequest& request, GatewayFailure failure)
 {
+    if (failure == GatewayFailure::no_healthy_upstream)
+    {
+        return make_json_response(
+            request, http::status::service_unavailable,
+            {{"error",
+              {{"code", "no_healthy_upstream"}, {"message", "no healthy upstream is available"}}}});
+    }
     if (failure == GatewayFailure::gateway_timeout)
     {
         return make_json_response(

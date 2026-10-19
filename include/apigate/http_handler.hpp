@@ -22,6 +22,7 @@ enum class GatewayFailure : std::uint8_t
     gateway_timeout,
     gateway_overloaded,
     buffer_capacity_exhausted,
+    no_healthy_upstream,
 };
 
 [[nodiscard]] HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& request);

@@ -348,7 +348,7 @@ void validate_route_prefix(std::string_view prefix)
                 }
                 keys[0].clear();
             }
-            else if (depth == 2 && route_key == "rate_limit")
+            else if (depth == 2 && (route_key == "rate_limit" || route_key == "health_check"))
             {
                 keys[1].clear();
             }
@@ -406,7 +406,8 @@ void validate_route_prefix(std::string_view prefix)
         {
             if (item.key() != "prefix" && item.key() != "host" && item.key() != "port" &&
                 item.key() != "timeout_ms" && item.key() != "strip_prefix" &&
-                item.key() != "rate_limit" && item.key() != "upstreams" && item.key() != "scheme")
+                item.key() != "rate_limit" && item.key() != "upstreams" && item.key() != "scheme" &&
+                item.key() != "health_check")
             {
                 throw ConfigError("APIGATE_ROUTES entry contains an unknown field");
             }
@@ -476,7 +477,68 @@ void validate_route_prefix(std::string_view prefix)
                 static_cast<std::uint32_t>(route_integer(limit.at("requests_per_second"), 1000000)),
                 static_cast<std::uint32_t>(route_integer(limit.at("burst"), 1000000))};
         }
-        routes.push_back({std::move(prefix), std::move(upstreams), strip_prefix, rate_limit});
+        std::optional<HealthCheckConfig> health_check;
+        if (entry.contains("health_check"))
+        {
+            const auto& health = entry.at("health_check");
+            if (!health.is_object() || !health.contains("path") || !health.at("path").is_string())
+            {
+                throw ConfigError("APIGATE_ROUTES health_check requires a path string");
+            }
+            for (const auto& item : health.items())
+            {
+                if (item.key() != "path" && item.key() != "interval_ms" &&
+                    item.key() != "timeout_ms" && item.key() != "unhealthy_threshold" &&
+                    item.key() != "healthy_threshold")
+                {
+                    throw ConfigError("APIGATE_ROUTES health_check contains an unknown field");
+                }
+            }
+            HealthCheckConfig settings{health.at("path").get<std::string>()};
+            if (settings.path.empty() || settings.path.front() != '/' ||
+                std::ranges::any_of(settings.path,
+                                    [](unsigned char character)
+                                    {
+                                        return character <= 32U || character == 127U ||
+                                               character == '?' || character == '#';
+                                    }))
+            {
+                throw ConfigError(
+                    "APIGATE_ROUTES health_check path must be a path without query or fragment");
+            }
+            struct NumberOptions
+            {
+                std::uint32_t default_value;
+                std::uint32_t minimum;
+                std::uint32_t maximum;
+            };
+            const auto integer = [&health](const char* field, NumberOptions options)
+            {
+                const auto number = health.contains(field)
+                                        ? route_integer(health.at(field), options.maximum)
+                                        : options.default_value;
+                if (number < options.minimum)
+                {
+                    throw ConfigError("APIGATE_ROUTES health_check number is out of range");
+                }
+                return static_cast<std::uint32_t>(number);
+            };
+            settings.interval_ms =
+                integer("interval_ms", {.default_value = 5000, .minimum = 100, .maximum = 60000});
+            settings.timeout_ms =
+                integer("timeout_ms", {.default_value = 1000, .minimum = 50, .maximum = 60000});
+            settings.unhealthy_threshold =
+                integer("unhealthy_threshold", {.default_value = 3, .minimum = 1, .maximum = 10});
+            settings.healthy_threshold =
+                integer("healthy_threshold", {.default_value = 2, .minimum = 1, .maximum = 10});
+            if (settings.timeout_ms > settings.interval_ms)
+            {
+                throw ConfigError("APIGATE_ROUTES health_check timeout must not exceed interval");
+            }
+            health_check = std::move(settings);
+        }
+        routes.push_back({std::move(prefix), std::move(upstreams), strip_prefix, rate_limit,
+                          std::move(health_check)});
     }
     return routes;
 }

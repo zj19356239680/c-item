@@ -695,6 +695,18 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
                 write_response(std::move(response));
                 return;
             }
+            if (admission.no_healthy_upstream)
+            {
+                auto response =
+                    make_gateway_error_response(request, GatewayFailure::no_healthy_upstream);
+                if (requests_served_ >= max_requests_per_connection)
+                {
+                    response.keep_alive(false);
+                }
+                log_request_completed(proxy_method_name(method), "proxy", response.result_int());
+                write_response(std::move(response));
+                return;
+            }
             proxy_permit_ = std::move(admission.permit);
             if (!proxy_permit_)
             {
@@ -1054,6 +1066,12 @@ class HttpServer::Impl
         {
             throw std::invalid_argument("drain completion callback must not be empty");
         }
+        health_checks_ = std::make_unique<detail::HealthChecks>(
+            io_context.get_executor(), config_, route_admission_->health_state(), logger_,
+            [this]() noexcept
+            {
+                fail_runtime("http_health_check_scheduler_failed", 0);
+            });
     }
 
     ~Impl()
@@ -1080,6 +1098,7 @@ class HttpServer::Impl
         logger_.info("http_listener_started",
                      {{"address", config_.listen_address}, {"port", bound_port_}});
         drive_accept();
+        health_checks_->start();
     }
 
     void begin_drain() noexcept
@@ -1344,6 +1363,7 @@ class HttpServer::Impl
 
     void stop_accepting() noexcept
     {
+        health_checks_->stop();
         accept_capacity_.stop();
         try
         {
@@ -1536,6 +1556,7 @@ class HttpServer::Impl
     std::shared_ptr<detail::BufferBudgetState> buffer_budget_;
     std::shared_ptr<detail::RouteProxyAdmission> route_admission_;
     std::function<void()> on_runtime_failure_;
+    std::unique_ptr<detail::HealthChecks> health_checks_;
     std::function<void()> on_drain_complete_;
     detail::RuntimeFailureState runtime_failure_state_;
     std::set<std::shared_ptr<HttpSession>, std::owner_less<std::shared_ptr<HttpSession>>> sessions_;

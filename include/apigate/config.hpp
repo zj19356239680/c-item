@@ -44,12 +44,22 @@ struct RateLimitConfig
     std::uint32_t burst;
 };
 
+struct HealthCheckConfig
+{
+    std::string path;
+    std::uint32_t interval_ms{5000};
+    std::uint32_t timeout_ms{1000};
+    std::uint32_t unhealthy_threshold{3};
+    std::uint32_t healthy_threshold{2};
+};
+
 struct RouteConfig
 {
     std::string prefix;
     std::vector<UpstreamConfig> upstreams;
     bool strip_prefix{false};
     std::optional<RateLimitConfig> rate_limit{std::nullopt};
+    std::optional<HealthCheckConfig> health_check{std::nullopt};
 };
 
 struct AppConfig

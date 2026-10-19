@@ -78,6 +78,12 @@ void print_help()
         << "                       strip_prefix is an optional boolean (default: false);\n"
         << "                       rate_limit optionally requires requests_per_second and burst\n"
         << "                       (integers 1-1000000); omitted means unlimited;\n"
+        << "                       health_check is optional (disabled if omitted), requires path;\n"
+        << "                       interval_ms=5000 (100-60000), timeout_ms=1000 (50-60000),\n"
+        << "                       timeout <= interval; unhealthy_threshold=3, "
+           "healthy_threshold=2\n"
+        << "                       (integers 1-10); GET headers/status only, max 4 probes "
+           "process-wide;\n"
         << "                       mutually exclusive with legacy upstream host/port/timeout "
            "variables\n";
 }

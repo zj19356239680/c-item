@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "apigate/http_handler.hpp"
+#include "health_check.hpp"
 #include "http_server_internal.hpp"
 #include "rate_limit.hpp"
 
@@ -19,6 +20,7 @@ struct RouteProxyAdmissionResult
     std::optional<ProxyPermit> permit;
     // Borrows immutable configuration; proxy construction consumes it synchronously.
     std::optional<SelectedUpstream> upstream;
+    bool no_healthy_upstream{false};
 };
 
 // One server-owned instance shared by all sessions, serialized by the single io_context.
@@ -30,11 +32,13 @@ class RouteProxyAdmission
                         TokenBucket::Clock::time_point now = TokenBucket::Clock::now());
     [[nodiscard]] RouteProxyAdmissionResult try_acquire(const SelectedRoute& route,
                                                         TokenBucket::Clock::time_point now);
+    [[nodiscard]] std::shared_ptr<UpstreamHealthState> health_state() const noexcept;
 
    private:
     RouteRateLimits rate_limits_;
     std::shared_ptr<ProxyAdmissionState> proxies_;
     std::vector<std::size_t> next_upstream_;
+    std::shared_ptr<UpstreamHealthState> health_;
 };
 
 }  // namespace apigate::detail
