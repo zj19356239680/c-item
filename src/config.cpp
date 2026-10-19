@@ -1,6 +1,7 @@
 #include "apigate/config.hpp"
 
 #include <algorithm>
+#include <array>
 #include <boost/asio/ip/address.hpp>
 #include <cctype>
 #include <charconv>
@@ -258,12 +259,12 @@ void validate_route_prefix(std::string_view prefix)
     if (!value.is_number_integer() ||
         (!value.is_number_unsigned() && value.get<std::int64_t>() < 0))
     {
-        throw ConfigError("APIGATE_ROUTES port and timeout_ms must be positive integers");
+        throw ConfigError("APIGATE_ROUTES integer field must be a positive integer");
     }
     const auto number = value.get<std::uint64_t>();
     if (number == 0 || number > maximum)
     {
-        throw ConfigError("APIGATE_ROUTES port or timeout_ms is out of range");
+        throw ConfigError("APIGATE_ROUTES integer field is out of range");
     }
     return number;
 }
@@ -275,25 +276,48 @@ void validate_route_prefix(std::string_view prefix)
         throw ConfigError("APIGATE_ROUTES must not exceed 65536 bytes");
     }
     using Json = nlohmann::json;
-    std::set<std::string> keys;
+    std::array<std::set<std::string>, 2> keys;
+    std::string route_key;
     std::size_t object_count = 0;
-    const auto callback = [&keys, &object_count](int depth, Json::parse_event_t event, Json& parsed)
+    const auto callback =
+        [&keys, &route_key, &object_count](int depth, Json::parse_event_t event, Json& parsed)
     {
         if (event == Json::parse_event_t::array_start && depth != 0)
         {
-            throw ConfigError("APIGATE_ROUTES must be an array of flat route objects");
+            throw ConfigError("APIGATE_ROUTES must be an array of route objects");
         }
         if (event == Json::parse_event_t::object_start)
         {
-            if (depth != 1 || ++object_count > 32)
+            if (depth == 1)
             {
-                throw ConfigError("APIGATE_ROUTES must contain at most 32 flat route objects");
+                if (++object_count > 32)
+                {
+                    throw ConfigError("APIGATE_ROUTES must contain at most 32 route objects");
+                }
+                keys[0].clear();
             }
-            keys.clear();
+            else if (depth == 2 && route_key == "rate_limit")
+            {
+                keys[1].clear();
+            }
+            else
+            {
+                throw ConfigError("APIGATE_ROUTES contains an invalid nested object");
+            }
         }
-        if (event == Json::parse_event_t::key && !keys.insert(parsed.get<std::string>()).second)
+        if (event == Json::parse_event_t::key)
         {
-            throw ConfigError("APIGATE_ROUTES contains a duplicate object field");
+            if (depth < 2 || depth > 3 ||
+                !keys.at(static_cast<std::size_t>(depth - 2))
+                     .insert(parsed.get<std::string>())
+                     .second)
+            {
+                throw ConfigError("APIGATE_ROUTES contains a duplicate object field");
+            }
+            if (depth == 2)
+            {
+                route_key = parsed.get<std::string>();
+            }
         }
         return true;
     };
@@ -322,7 +346,8 @@ void validate_route_prefix(std::string_view prefix)
         for (const auto& item : entry.items())
         {
             if (item.key() != "prefix" && item.key() != "host" && item.key() != "port" &&
-                item.key() != "timeout_ms" && item.key() != "strip_prefix")
+                item.key() != "timeout_ms" && item.key() != "strip_prefix" &&
+                item.key() != "rate_limit")
             {
                 throw ConfigError("APIGATE_ROUTES entry contains an unknown field");
             }
@@ -361,8 +386,24 @@ void validate_route_prefix(std::string_view prefix)
             throw ConfigError("APIGATE_ROUTES strip_prefix must be a boolean");
         }
         const bool strip_prefix = entry.value("strip_prefix", false);
-        routes.push_back(
-            {std::move(prefix), {std::move(validated_host), port, timeout}, strip_prefix});
+        std::optional<RateLimitConfig> rate_limit;
+        if (entry.contains("rate_limit"))
+        {
+            const auto& limit = entry.at("rate_limit");
+            if (!limit.is_object() || limit.size() != 2 || !limit.contains("requests_per_second") ||
+                !limit.contains("burst"))
+            {
+                throw ConfigError(
+                    "APIGATE_ROUTES rate_limit requires only requests_per_second and burst");
+            }
+            rate_limit = RateLimitConfig{
+                static_cast<std::uint32_t>(route_integer(limit.at("requests_per_second"), 1000000)),
+                static_cast<std::uint32_t>(route_integer(limit.at("burst"), 1000000))};
+        }
+        routes.push_back({std::move(prefix),
+                          {std::move(validated_host), port, timeout},
+                          strip_prefix,
+                          rate_limit});
     }
     return routes;
 }

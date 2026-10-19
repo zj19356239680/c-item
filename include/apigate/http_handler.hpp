@@ -2,6 +2,7 @@
 #define APIGATE_HTTP_HANDLER_HPP_
 
 #include <boost/beast/http.hpp>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -32,12 +33,15 @@ struct SelectedUpstream
     const UpstreamConfig& upstream;
     std::string_view prefix;
     bool strip_prefix{false};
+    std::optional<std::size_t> route_index{std::nullopt};
 };
 
 [[nodiscard]] std::optional<SelectedUpstream> select_http_upstream(
     const AppConfig& config, const HttpRequest& request) noexcept;
 [[nodiscard]] HttpResponse make_gateway_error_response(const HttpRequest& request,
                                                        GatewayFailure failure);
+[[nodiscard]] HttpResponse make_rate_limited_response(const HttpRequest& request,
+                                                      std::uint32_t retry_after_seconds);
 
 }  // namespace apigate
 

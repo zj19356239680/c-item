@@ -28,6 +28,7 @@
 #include "buffer_budget.hpp"
 #include "http_proxy.hpp"
 #include "http_server_internal.hpp"
+#include "rate_limit.hpp"
 
 #ifdef APIGATE_HTTP_SESSION_TESTING
 #include "http_session_probe.hpp"
@@ -365,12 +366,14 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
 
     HttpSession(tcp::socket socket, const AppConfig& config, StructuredLogger& logger,
                 std::shared_ptr<detail::ProxyAdmissionState> proxy_admission,
-                std::shared_ptr<detail::BufferBudgetState> buffer_budget, CloseCallback on_close)
+                std::shared_ptr<detail::BufferBudgetState> buffer_budget,
+                std::shared_ptr<detail::RouteRateLimits> rate_limits, CloseCallback on_close)
         : stream_(std::move(socket)),
           config_(config),
           logger_(logger),
           proxy_admission_(std::move(proxy_admission)),
           buffer_budget_(std::move(buffer_budget)),
+          rate_limits_(std::move(rate_limits)),
           on_close_(std::move(on_close))
     {
         if (!proxy_admission_)
@@ -384,6 +387,10 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         if (!on_close_)
         {
             throw std::invalid_argument("session close callback must not be empty");
+        }
+        if (!rate_limits_)
+        {
+            throw std::invalid_argument("route rate limits must not be empty");
         }
         boost::system::error_code error;
         const auto endpoint = stream_.socket().remote_endpoint(error);
@@ -673,6 +680,24 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         const auto method = request.method();
         try
         {
+            if (upstream.route_index)
+            {
+                const auto decision = rate_limits_->try_acquire(*upstream.route_index,
+                                                                detail::TokenBucket::Clock::now());
+                if (!decision.allowed)
+                {
+                    auto response =
+                        make_rate_limited_response(request, decision.retry_after_seconds);
+                    if (requests_served_ >= max_requests_per_connection)
+                    {
+                        response.keep_alive(false);
+                    }
+                    log_request_completed(proxy_method_name(method), "proxy",
+                                          response.result_int());
+                    write_response(std::move(response));
+                    return;
+                }
+            }
             proxy_permit_ = detail::ProxyPermit::try_acquire(proxy_admission_);
             if (!proxy_permit_)
             {
@@ -956,6 +981,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
     StructuredLogger& logger_;
     std::shared_ptr<detail::ProxyAdmissionState> proxy_admission_;
     std::shared_ptr<detail::BufferBudgetState> buffer_budget_;
+    std::shared_ptr<detail::RouteRateLimits> rate_limits_;
     CloseCallback on_close_;
     std::optional<http::request_parser<http::string_body>> parser_;
     std::optional<HttpResponse> response_;
@@ -981,6 +1007,7 @@ detail::SessionWriteProbe detail::start_session_write_probe(
 {
     auto session = std::make_shared<HttpSession>(std::move(socket), config, logger,
                                                  std::move(admission), std::move(budget),
+                                                 std::make_shared<RouteRateLimits>(config.routes),
                                                  [on_close = std::move(on_close)](HttpSession*)
                                                  {
                                                      on_close();
@@ -1011,6 +1038,7 @@ class HttpServer::Impl
           proxy_admission_(
               std::make_shared<detail::ProxyAdmissionState>(config.max_concurrent_proxies)),
           buffer_budget_(std::make_shared<detail::BufferBudgetState>(config.max_in_flight_bytes)),
+          rate_limits_(std::make_shared<detail::RouteRateLimits>(config.routes)),
           on_runtime_failure_(std::move(on_runtime_failure)),
           on_drain_complete_(std::move(on_drain_complete))
     {
@@ -1217,7 +1245,7 @@ class HttpServer::Impl
         }
 
         auto session = std::make_shared<HttpSession>(std::move(socket), config_, logger_,
-                                                     proxy_admission_, buffer_budget_,
+                                                     proxy_admission_, buffer_budget_, rate_limits_,
                                                      [this](HttpSession* closed_session)
                                                      {
                                                          remove_session(closed_session);
@@ -1502,6 +1530,7 @@ class HttpServer::Impl
     detail::DrainState drain_state_;
     std::shared_ptr<detail::ProxyAdmissionState> proxy_admission_;
     std::shared_ptr<detail::BufferBudgetState> buffer_budget_;
+    std::shared_ptr<detail::RouteRateLimits> rate_limits_;
     std::function<void()> on_runtime_failure_;
     std::function<void()> on_drain_complete_;
     detail::RuntimeFailureState runtime_failure_state_;

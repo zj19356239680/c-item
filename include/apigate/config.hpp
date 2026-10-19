@@ -28,11 +28,18 @@ struct UpstreamConfig
     std::uint32_t timeout_ms{3000};
 };
 
+struct RateLimitConfig
+{
+    std::uint32_t requests_per_second;
+    std::uint32_t burst;
+};
+
 struct RouteConfig
 {
     std::string prefix;
     UpstreamConfig upstream;
     bool strip_prefix{false};
+    std::optional<RateLimitConfig> rate_limit{std::nullopt};
 };
 
 struct AppConfig

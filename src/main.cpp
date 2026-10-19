@@ -71,6 +71,8 @@ void print_help()
         << "  APIGATE_ROUTES        Optional JSON array of 1-32 static path routes (max 64 KiB);\n"
         << "                       prefix/host/port required, timeout_ms defaults to 3000;\n"
         << "                       strip_prefix is an optional boolean (default: false);\n"
+        << "                       rate_limit optionally requires requests_per_second and burst\n"
+        << "                       (integers 1-1000000); omitted means unlimited;\n"
         << "                       mutually exclusive with APIGATE_UPSTREAM_*\n";
 }
 

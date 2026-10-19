@@ -180,6 +180,20 @@ TEST(HttpHandlerTest, RejectsUnsupportedProxyTargetAndUpgrade)
     EXPECT_EQ(apigate::handle_http_request(config, upgrade).result(), http::status::bad_request);
 }
 
+TEST(HttpHandlerTest, CreatesSafeRateLimitResponse)
+{
+    const auto request = make_request(http::verb::post, "/private-target?private-query");
+    const auto response = apigate::make_rate_limited_response(request, 1);
+    EXPECT_EQ(response.result(), http::status::too_many_requests);
+    EXPECT_EQ(response[http::field::retry_after], "1");
+    EXPECT_EQ(response.version(), request.version());
+    EXPECT_EQ(response.keep_alive(), request.keep_alive());
+    const auto body = nlohmann::json::parse(response.body());
+    EXPECT_EQ(body["error"]["code"], "rate_limited");
+    EXPECT_EQ(body["error"]["message"], "request rate limit is exceeded");
+    EXPECT_EQ(response.body().find("private-"), std::string::npos);
+}
+
 TEST(HttpHandlerTest, CreatesSafeGatewayErrors)
 {
     const auto request = make_request(http::verb::get, "/private?secret=value");

@@ -3,7 +3,8 @@
 ApiGate 是一个用于学习和逐步开发 API 网关的 C++20 项目。当前版本提供异步
 HTTP/1.1 健康检查、配置校验、JSON 日志，以及可选的路径路由与多个静态 HTTP 上游。
 代理支持 GET 及有界正文的 POST、PUT、PATCH。它没有负载均衡、流式上传、重试、连接池、
-缓存、限流、认证、TLS 或 HTTP/2；不要把它当作生产网关。本项目在 Linux 环境下开发，
+缓存、每客户端或分布式限流、认证、TLS 或 HTTP/2；可选按路由限流不构成生产容量保证。
+不要把它当作生产网关。本项目在 Linux 环境下开发，
 仅支持 Linux 构建与运行。
 
 ## 快速启动与验证
@@ -233,7 +234,7 @@ bash scripts/run.sh
 
 ```bash
 unset APIGATE_UPSTREAM_HOST APIGATE_UPSTREAM_PORT APIGATE_UPSTREAM_TIMEOUT_MS
-APIGATE_ROUTES='[{"prefix":"/users","host":"127.0.0.1","port":9001,"strip_prefix":true},{"prefix":"/orders","host":"127.0.0.1","port":9002,"timeout_ms":2000}]' \
+APIGATE_ROUTES='[{"prefix":"/users","host":"127.0.0.1","port":9001,"strip_prefix":true,"rate_limit":{"requests_per_second":10,"burst":20}},{"prefix":"/orders","host":"127.0.0.1","port":9002,"timeout_ms":2000}]' \
 bash scripts/run.sh
 ```
 
@@ -260,13 +261,31 @@ Location、Cookie Path 重写；后端对路径的解释可能不同。
 上游重建，使用该路由的超时。连接、代理并发和正文预算仍由所有路由全局共享。
 多个静态上游不等于负载均衡、故障转移、服务发现或动态更新。
 
+每条路由还可选 `rate_limit` 对象；省略时不限流。配置后必须同时提供整数
+`requests_per_second` 和 `burst`，两者范围均为 1–1000000；拒绝布尔、浮点、字符串、
+null、未知或重复字段。前者是每秒补充的令牌数，后者是最多可积累的令牌数和初始
+突发额度，每次限流准入消耗一个令牌。按单调时间惰性补充，不排队、不自动重试。
+同一进程所有客户端共享所选路由的桶，即使 keep-alive 也逐请求检查；不同路由独立，
+即使指向同一后端。多进程之间不共享，重启会恢复初始突发额度。前缀剥离不改变桶归属。
+本地 `/healthz`、`/readyz` 豁免；未命中和原本非法的请求保留原有响应，不消耗令牌。
+
+耗尽时不访问上游，返回 429：
+`{"error":{"code":"rate_limited","message":"request rate limit is exceeded"}}`。
+`Retry-After` 按下一令牌的等待时间向上取整为整数秒，至少为 1；它只是重试建议，
+其他客户端可能先消费令牌，不保证届时获准。429 与连接、代理并发和正文预算容量
+机制独立，不是既有的容量 503。限流在完整读取正文、校验和选路之后，代理名额申请
+之前执行一次；通过后即使容量拒绝、上游失败、断连或取消也不返还令牌。
+它保护上游请求速率，不是上传带宽限制、连接容量限制、公平性或生产容量保证。
+正常 429 沿用低敏感度 `http_request_completed` 日志，不记录路径、query 或正文，
+不误报上游错误；实际容量和性能仍需在目标负载下测量。
+
 新旧上游变量均未设置时代理关闭，原有未知 GET 的 404 及其他方法的 405 行为保持不变。
 三项容量配置始终校验；代理关闭时代理并发上限不被使用。配置检查结果会报告
 `max_connections`、`max_concurrent_proxies`、`max_in_flight_bytes`、
 `shutdown_grace_ms`、`proxy_enabled`；旧单上游模式包含 `upstream_timeout_ms`，
 路由模式只包含安全的 `route_count`，不会输出路由表、host 或 prefix，也不虚构统一超时。
 
-当前没有每客户端/IP 限制或请求速率限制；也不支持其他代理方法、
+当前没有每客户端/IP、全局或分布式限流；也不支持其他代理方法、
 流式上传、连接池、动态路由、上游 TLS、HTTP/2、WebSocket 或预排空管理阶段。实际可承载数量
 仍受文件描述符、内存、CPU、请求/响应缓冲和操作系统 backlog 等因素约束。现有测试
 覆盖不构成生产容量或协议兼容性承诺。

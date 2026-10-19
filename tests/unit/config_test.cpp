@@ -71,6 +71,7 @@ TEST_F(ConfigTest, ParsesStaticRoutesWithDefaultsAndBoundaries)
     EXPECT_FALSE(config.upstream.has_value());
     EXPECT_EQ(config.routes[0].prefix, "/");
     EXPECT_FALSE(config.routes[0].strip_prefix);
+    EXPECT_FALSE(config.routes[0].rate_limit.has_value());
     EXPECT_EQ(config.routes[0].upstream.timeout_ms, 3000U);
     EXPECT_EQ(config.routes[1].upstream.host, "::1");
     EXPECT_EQ(config.routes[1].upstream.port, 65535);
@@ -108,6 +109,90 @@ TEST_F(ConfigTest, AcceptsOnlyBooleanStripPrefixAndRejectsDuplicates)
             1),
         0);
     EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()), apigate::ConfigError);
+}
+
+TEST_F(ConfigTest, ParsesRateLimitsAndKeepsNestedObjectsOutOfRouteCount)
+{
+    auto entries = nlohmann::json::array();
+    for (int index = 0; index < 32; ++index)
+    {
+        entries.push_back({{"prefix", "/p" + std::to_string(index)},
+                           {"host", "h"},
+                           {"port", 80},
+                           {"rate_limit",
+                            {{"requests_per_second", index == 0 ? 1 : 1000000},
+                             {"burst", index == 0 ? 1000000 : 1}}}});
+    }
+    const auto raw = entries.dump();
+    ASSERT_EQ(setenv("APIGATE_ROUTES", raw.c_str(), 1), 0);
+    const auto config = apigate::load_config_from_environment();
+    ASSERT_EQ(config.routes.size(), 32U);
+    const auto first = config.routes.front().rate_limit.value_or(apigate::RateLimitConfig{});
+    const auto last = config.routes.back().rate_limit.value_or(apigate::RateLimitConfig{});
+    EXPECT_EQ(first.requests_per_second, 1U);
+    EXPECT_EQ(first.burst, 1000000U);
+    EXPECT_EQ(last.requests_per_second, 1000000U);
+    EXPECT_EQ(last.burst, 1U);
+}
+
+TEST_F(ConfigTest, RejectsInvalidRateLimitShapesFieldsAndNumbersWithoutEchoingValues)
+{
+    const auto base =
+        nlohmann::json{{"prefix", "/private-prefix"}, {"host", "private-host.test"}, {"port", 80}};
+    const auto check_rejected = [](const std::string& raw)
+    {
+        ASSERT_EQ(setenv("APIGATE_ROUTES", raw.c_str(), 1), 0);
+        try
+        {
+            static_cast<void>(apigate::load_config_from_environment());
+            FAIL() << "invalid rate limit was accepted";
+        }
+        catch (const apigate::ConfigError& error)
+        {
+            EXPECT_EQ(std::string{error.what()}.find("private-"), std::string::npos);
+            EXPECT_EQ(std::string{error.what()}.find(raw), std::string::npos);
+        }
+    };
+    for (const auto& value :
+         nlohmann::json::array({nullptr,
+                                true,
+                                1,
+                                1.0,
+                                "private-value",
+                                nlohmann::json::array(),
+                                nlohmann::json::object(),
+                                {{"burst", 1}},
+                                {{"requests_per_second", 1}},
+                                {{"requests_per_second", 1}, {"burst", 1}, {"unknown", 1}}}))
+    {
+        auto entry = base;
+        entry["rate_limit"] = value;
+        check_rejected(nlohmann::json::array({entry}).dump());
+    }
+    for (const char* field : {"requests_per_second", "burst"})
+    {
+        for (const auto& invalid :
+             nlohmann::json::array({0, -1, 1000001, true, false, 1.0, 1.5, "private-value", nullptr,
+                                    std::uint64_t{18446744073709551615ULL}}))
+        {
+            auto entry = base;
+            entry["rate_limit"] = {{"requests_per_second", 10}, {"burst", 20}};
+            entry["rate_limit"][field] = invalid;
+            check_rejected(nlohmann::json::array({entry}).dump());
+        }
+    }
+    for (
+        const char* raw :
+        {R"([{"prefix":"/a","host":"h","port":80,"rate_limit":{"requests_per_second":1,"burst":1,"burst":2}}])",
+         R"([{"prefix":"/a","host":"h","port":80,"rate_limit":{"requests_per_second":1,"requests_per_second":2,"burst":1}}])",
+         R"([{"prefix":"/a","host":"h","port":80,"rate_limit":{"requests_per_second":1,"burst":1,"\u0062urst":2}}])",
+         R"([{"prefix":"/a","host":"h","port":80,"rate_limit":{"requests_per_second":1,"burst":1},"rate_limit":{"requests_per_second":2,"burst":2}}])",
+         R"([{"prefix":"/a","rate_limit":{"requests_per_second":1,"burst":1},"host":"h","host":"x","port":80}])",
+         R"([{"prefix":"/a","host":"h","port":80,"rate_limit":{"requests_per_second":{},"burst":1}}])",
+         R"([{"prefix":"/a","host":"h","port":80,"rate_limit":{"requests_per_second":1,"burst":18446744073709551616}}])"})
+    {
+        check_rejected(raw);
+    }
 }
 
 TEST_F(ConfigTest, RejectsRouteShapesFieldsDuplicatesAndTypes)

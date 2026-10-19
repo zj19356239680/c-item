@@ -104,13 +104,15 @@ std::optional<SelectedUpstream> select_http_upstream(const AppConfig& config,
     const auto path = request_path(target);
     std::optional<SelectedUpstream> selected;
     std::size_t longest = 0;
-    for (const auto& route : config.routes)
+    for (std::size_t index = 0; index < config.routes.size(); ++index)
     {
+        const auto& route = config.routes[index];
         const auto& prefix = route.prefix;
         if (prefix.size() > longest && path.starts_with(prefix) &&
             (prefix == "/" || path.size() == prefix.size() || path[prefix.size()] == '/'))
         {
-            selected.emplace(SelectedUpstream{route.upstream, route.prefix, route.strip_prefix});
+            selected.emplace(
+                SelectedUpstream{route.upstream, route.prefix, route.strip_prefix, index});
             longest = prefix.size();
         }
     }
@@ -161,6 +163,16 @@ HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& req
     }
     return make_json_response(request, http::status::not_found,
                               {{"error", {{"code", "not_found"}, {"message", "route not found"}}}});
+}
+
+HttpResponse make_rate_limited_response(const HttpRequest& request,
+                                        std::uint32_t retry_after_seconds)
+{
+    auto response = make_json_response(
+        request, http::status::too_many_requests,
+        {{"error", {{"code", "rate_limited"}, {"message", "request rate limit is exceeded"}}}});
+    response.set(http::field::retry_after, std::to_string(retry_after_seconds));
+    return response;
 }
 
 HttpResponse make_gateway_error_response(const HttpRequest& request, GatewayFailure failure)
