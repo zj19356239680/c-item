@@ -1,9 +1,9 @@
 # ApiGate
 
 ApiGate 是一个用于学习和逐步开发 API 网关的 C++20 项目。当前版本提供异步
-HTTP/1.1 健康检查、配置校验、JSON 日志，以及可选的路径路由与多个静态 HTTP 上游。
+HTTP/1.1 健康检查、配置校验、JSON 日志，以及可选的路径路由与多个静态 HTTP/HTTPS 上游。
 代理支持 GET 及有界正文的 POST、PUT、PATCH，以及同一路由多实例轮询。它没有流式上传、重试、连接池、
-缓存、每客户端或分布式限流、认证、TLS 或 HTTP/2；可选按路由限流不构成生产容量保证。
+缓存、每客户端或分布式限流、认证、下游 TLS 或 HTTP/2；可选按路由限流不构成生产容量保证。
 不要把它当作生产网关。本项目在 Linux 环境下开发，
 仅支持 Linux 构建与运行。
 
@@ -214,6 +214,7 @@ bash scripts/check.sh
 | `APIGATE_UPSTREAM_HOST` | 未设置 | 纯 DNS 主机名、IPv4 或 IPv6 字面地址；必须与端口同时设置 |
 | `APIGATE_UPSTREAM_PORT` | 未设置 | 1–65535；必须与主机同时设置 |
 | `APIGATE_UPSTREAM_TIMEOUT_MS` | `3000`（代理启用时） | 1–60000；仅可与完整上游配置一起使用 |
+| `APIGATE_UPSTREAM_CA_FILE` | 未设置 | 可加载的 PEM CA 文件；替代系统 HTTPS 信任库；空值或加载失败在监听前报错，不输出路径 |
 | `APIGATE_ROUTES` | 未设置 | 非空 JSON 数组，最多 32 条、原始值最多 64 KiB；与任一旧上游变量互斥 |
 
 例如，换一个本机端口运行：
@@ -254,11 +255,45 @@ APIGATE_ROUTES='[{"prefix":"/api","strip_prefix":true,"upstreams":[{"host":"127.
 bash scripts/run.sh
 ```
 
-每条路由必须选择一种后端形式。`upstreams` 与路由级 `host`、`port`、`timeout_ms`
+每条路由必须选择一种后端形式。`upstreams` 与路由级 `host`、`port`、`timeout_ms`、`scheme`
 任一字段互斥（即使该字段为空或 null）；数组非空且最多 16 项。每项仅接受必填
-host、port 和可选 timeout_ms，沿用上述主机、整数端口及超时校验，超时默认 3000 毫秒。
+host、port 和可选 timeout_ms、scheme，沿用上述主机、整数端口及超时校验，超时默认 3000 毫秒。
 未知、重复、缺失字段、非法类型和非预期嵌套均拒绝。重复地址不去重，每项是独立槽位。
-原始配置仍最多 64 KiB、最多 32 条路由，与旧环境变量互斥，不新增环境变量。
+原始配置仍最多 64 KiB、最多 32 条路由，与旧三项上游环境变量互斥。
+
+### HTTPS 上游
+
+两种路由后端形式都支持 `scheme`，只接受字符串 `http` 或 `https`，省略为 `http`。
+不根据端口推断协议，port 始终必填，host 仍是 DNS/IP 而不是 URL。旧路由和旧
+`APIGATE_UPSTREAM_HOST/PORT/TIMEOUT_MS` 模式保持 HTTP。同一路由可以混合两种实例：
+
+```bash
+unset APIGATE_UPSTREAM_HOST APIGATE_UPSTREAM_PORT APIGATE_UPSTREAM_TIMEOUT_MS
+APIGATE_ROUTES='[{"prefix":"/api","strip_prefix":true,"upstreams":[{"host":"backend.example.com","port":443,"scheme":"https"},{"host":"127.0.0.1","port":9001}]}]' \
+bash scripts/run.sh
+```
+
+HTTPS 验证证书链及**配置 host** 的服务器身份，DNS 主机发送该名称作为 SNI，IP 按
+IP SAN 验证且不发送 DNS SNI；不采用下游 Host，也没有跳过验证开关。最低 TLS 1.2，
+ALPN 只提供 HTTP/1.1。未设置 CA 文件时使用运行机器的系统 CA bundle，依次查找
+`/etc/ssl/certs/ca-certificates.crt`、`/etc/pki/tls/certs/ca-bundle.crt`、`/etc/ssl/cert.pem`，
+加载首个存在的文件；不是 vcpkg 的安装路径。私有 CA 可通过
+`APIGATE_UPSTREAM_CA_FILE=/path/to/ca.pem` 指定，它**替代而非叠加**系统信任。
+显式文件即使没有 HTTPS 路由也要校验；纯 HTTP 且未指定文件不加载系统信任。
+`--check-config` 同样加载本地信任配置，但不执行 DNS 或连接后端，也不输出路径或证书。
+
+TLS 握手单独使用所选后端的 timeout_ms；超时返回安全 504，证书、身份及其他握手
+失败返回安全 502，诊断阶段为 `handshake`（期限触发仍为 `timeout`）。完整、有界定的
+HTTP 响应收到后直接回收底层连接，不等待 TLS close_notify；未完整响应的 TLS 截断
+仍作为读取失败，不能当作成功。取消和第二信号强停会关闭握手及读写的底层 socket。
+轮询、限流、Host、前缀剥离、query、全局容量和正文预算语义不变，不自动重试。
+
+OpenSSL 由现有 vcpkg/CMake 管理，当前 x64-linux 静态链接 SSL/crypto；运行环境仍需
+系统 CA（Ubuntu 的 ca-certificates）或可读的自定义 PEM。TLS 进程测试还需本机 openssl
+命令生成临时测试 CA/密钥，不使用个人证书。下游仍为 HTTP；不支持 mTLS、HTTP/2、
+故障摘除或全面生产容量保证。
+
+### 轮询与路由限流
 
 每条路由的轮询位置在单进程内由所有客户端共享，同一 keep-alive 连接逐请求参与。
 初始选择第一个槽位，按数组顺序循环；不同路由互不影响，重启后从第一个重新开始。
@@ -310,7 +345,7 @@ null、未知或重复字段。前者是每秒补充的令牌数，后者是最�
 路由模式只包含安全的 `route_count`，不会输出路由表、host 或 prefix，也不虚构统一超时。
 
 当前没有每客户端/IP、全局或分布式限流；也不支持其他代理方法、
-流式上传、连接池、动态路由、上游 TLS、HTTP/2、WebSocket 或预排空管理阶段。实际可承载数量
+流式上传、连接池、动态路由、下游 TLS、mTLS、HTTP/2、WebSocket 或预排空管理阶段。实际可承载数量
 仍受文件描述符、内存、CPU、请求/响应缓冲和操作系统 backlog 等因素约束。现有测试
 覆盖不构成生产容量或协议兼容性承诺。
 

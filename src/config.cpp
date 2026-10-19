@@ -14,6 +14,8 @@
 #include <system_error>
 #include <utility>
 
+#include "upstream_tls.hpp"
+
 namespace apigate
 {
 namespace
@@ -295,7 +297,17 @@ void validate_route_prefix(std::string_view prefix)
         entry.contains("timeout_ms")
             ? static_cast<std::uint32_t>(route_integer(entry.at("timeout_ms"), 60000))
             : 3000U;
-    return {std::move(validated_host), port, timeout};
+    UpstreamScheme scheme = UpstreamScheme::http;
+    if (entry.contains("scheme"))
+    {
+        const auto& value = entry.at("scheme");
+        if (!value.is_string() || (value != "http" && value != "https"))
+        {
+            throw ConfigError("APIGATE_ROUTES scheme must be http or https");
+        }
+        scheme = value == "https" ? UpstreamScheme::https : UpstreamScheme::http;
+    }
+    return {std::move(validated_host), port, timeout, scheme};
 }
 
 [[nodiscard]] std::vector<RouteConfig> parse_routes(std::string_view value)
@@ -394,7 +406,7 @@ void validate_route_prefix(std::string_view prefix)
         {
             if (item.key() != "prefix" && item.key() != "host" && item.key() != "port" &&
                 item.key() != "timeout_ms" && item.key() != "strip_prefix" &&
-                item.key() != "rate_limit" && item.key() != "upstreams")
+                item.key() != "rate_limit" && item.key() != "upstreams" && item.key() != "scheme")
             {
                 throw ConfigError("APIGATE_ROUTES entry contains an unknown field");
             }
@@ -412,7 +424,8 @@ void validate_route_prefix(std::string_view prefix)
         std::vector<UpstreamConfig> upstreams;
         if (entry.contains("upstreams"))
         {
-            if (entry.contains("host") || entry.contains("port") || entry.contains("timeout_ms"))
+            if (entry.contains("host") || entry.contains("port") || entry.contains("timeout_ms") ||
+                entry.contains("scheme"))
             {
                 throw ConfigError(
                     "APIGATE_ROUTES upstreams conflicts with route-level upstream fields");
@@ -430,7 +443,8 @@ void validate_route_prefix(std::string_view prefix)
                 }
                 for (const auto& item : backend.items())
                 {
-                    if (item.key() != "host" && item.key() != "port" && item.key() != "timeout_ms")
+                    if (item.key() != "host" && item.key() != "port" &&
+                        item.key() != "timeout_ms" && item.key() != "scheme")
                     {
                         throw ConfigError(
                             "APIGATE_ROUTES upstream entry contains an unknown field");
@@ -522,6 +536,18 @@ AppConfig load_config_from_environment()
     if (const auto routes = read_environment("APIGATE_ROUTES"))
     {
         config.routes = parse_routes(*routes);
+        const bool https_enabled = std::ranges::any_of(
+            config.routes,
+            [](const RouteConfig& route)
+            {
+                return std::ranges::any_of(route.upstreams,
+                                           [](const UpstreamConfig& upstream)
+                                           {
+                                               return upstream.scheme == UpstreamScheme::https;
+                                           });
+            });
+        config.upstream_tls_context =
+            make_upstream_tls_context(read_environment("APIGATE_UPSTREAM_CA_FILE"), https_enabled);
         return config;
     }
     const auto upstream_host = read_environment("APIGATE_UPSTREAM_HOST");
@@ -545,6 +571,8 @@ AppConfig load_config_from_environment()
         }
         config.upstream = std::move(upstream);
     }
+    config.upstream_tls_context =
+        make_upstream_tls_context(read_environment("APIGATE_UPSTREAM_CA_FILE"), false);
     return config;
 }
 

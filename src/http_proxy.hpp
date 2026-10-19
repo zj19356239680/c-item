@@ -24,6 +24,7 @@ enum class ProxyFailureStage : std::uint8_t
 {
     resolve,
     connect,
+    handshake,
     write,
     read,
     timeout,
@@ -117,6 +118,7 @@ class HttpProxyExchange : public std::enable_shared_from_this<HttpProxyExchange>
 
     HttpProxyExchange(const boost::asio::any_io_executor& executor,
                       const SelectedUpstream& selected, const HttpRequest& request,
+                      std::shared_ptr<UpstreamTlsContext> tls_context,
                       std::shared_ptr<detail::BufferBudgetState> buffer_budget,
                       std::shared_ptr<detail::BufferBudgetPermit> request_body_permit,
                       CompletionCallback on_complete, AbortCallback on_abort);

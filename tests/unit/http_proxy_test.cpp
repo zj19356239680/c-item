@@ -195,6 +195,7 @@ TEST(HttpProxyTest, ExposesStableFailureStages)
 {
     EXPECT_EQ(apigate::to_string(apigate::ProxyFailureStage::resolve), "resolve");
     EXPECT_EQ(apigate::to_string(apigate::ProxyFailureStage::connect), "connect");
+    EXPECT_EQ(apigate::to_string(apigate::ProxyFailureStage::handshake), "handshake");
     EXPECT_EQ(apigate::to_string(apigate::ProxyFailureStage::write), "write");
     EXPECT_EQ(apigate::to_string(apigate::ProxyFailureStage::read), "read");
     EXPECT_EQ(apigate::to_string(apigate::ProxyFailureStage::timeout), "timeout");

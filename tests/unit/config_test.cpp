@@ -1,11 +1,14 @@
 #include "apigate/config.hpp"
 
 #include <gtest/gtest.h>
+#include <openssl/ssl.h>
 
 #include <cstdlib>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
+
+#include "upstream_tls.hpp"
 
 namespace
 {
@@ -39,6 +42,7 @@ class ConfigTest : public testing::Test
         unsetenv("APIGATE_UPSTREAM_HOST");
         unsetenv("APIGATE_UPSTREAM_PORT");
         unsetenv("APIGATE_UPSTREAM_TIMEOUT_MS");
+        unsetenv("APIGATE_UPSTREAM_CA_FILE");
         unsetenv("APIGATE_ROUTES");
     }
 };
@@ -58,6 +62,7 @@ TEST_F(ConfigTest, UsesSafeDefaults)
     EXPECT_EQ(config.shutdown_grace_ms, 5000U);
     EXPECT_FALSE(config.upstream.has_value());
     EXPECT_TRUE(config.routes.empty());
+    EXPECT_FALSE(config.upstream_tls_context);
 }
 
 TEST_F(ConfigTest, ParsesStaticRoutesWithDefaultsAndBoundaries)
@@ -80,6 +85,72 @@ TEST_F(ConfigTest, ParsesStaticRoutesWithDefaultsAndBoundaries)
     EXPECT_EQ(config.routes[1].upstreams.front().port, 65535);
     EXPECT_EQ(config.routes[1].upstreams.front().timeout_ms, 60000U);
     EXPECT_EQ(config.routes[2].upstreams.front().timeout_ms, 1U);
+}
+
+TEST_F(ConfigTest, ParsesSchemesWithoutPortInferenceAndEnforcesTlsPolicy)
+{
+    const auto raw = R"([{"prefix":"/a","host":"localhost","port":9001,"scheme":"https"},
+        {"prefix":"/b","upstreams":[{"host":"localhost","port":443},
+        {"host":"localhost","port":80,"scheme":"https"},
+        {"host":"localhost","port":443,"scheme":"http"}]}])";
+    ASSERT_EQ(setenv("APIGATE_ROUTES", raw, 1), 0);
+    const auto config = apigate::load_config_from_environment();
+    EXPECT_EQ(config.routes[0].upstreams[0].scheme, apigate::UpstreamScheme::https);
+    EXPECT_EQ(config.routes[1].upstreams[0].scheme, apigate::UpstreamScheme::http);
+    EXPECT_EQ(config.routes[1].upstreams[1].scheme, apigate::UpstreamScheme::https);
+    EXPECT_EQ(config.routes[1].upstreams[2].scheme, apigate::UpstreamScheme::http);
+    ASSERT_TRUE(config.upstream_tls_context);
+    auto* context = config.upstream_tls_context->context.native_handle();
+    EXPECT_EQ(SSL_CTX_get_min_proto_version(context), TLS1_2_VERSION);
+    EXPECT_EQ(SSL_CTX_get_verify_mode(context), SSL_VERIFY_PEER);
+    EXPECT_EQ(SSL_CTX_get_session_cache_mode(context), SSL_SESS_CACHE_OFF);
+}
+
+TEST_F(ConfigTest, RejectsInvalidSchemesDuplicatesAndPoolConflicts)
+{
+    for (const auto* value : {"null", "true", "1", "1.0", "\"\"", "\"HTTPS\"", "\"ftp\""})
+    {
+        const std::string backend =
+            std::string{R"({"host":"localhost","port":443,"scheme":)"} + value + "}";
+        for (const auto& raw : {"[{\"prefix\":\"/\"," + backend.substr(1) + "]",
+                                "[{\"prefix\":\"/\",\"upstreams\":[" + backend + "]}]"})
+        {
+            ASSERT_EQ(setenv("APIGATE_ROUTES", raw.c_str(), 1), 0);
+            EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()),
+                         apigate::ConfigError);
+        }
+    }
+    for (
+        const auto* raw :
+        {R"([{"prefix":"/","host":"localhost","port":443,"scheme":"http","scheme":"https"}])",
+         R"([{"prefix":"/","upstreams":[{"host":"localhost","port":443,"scheme":"http","scheme":"https"}]}])",
+         R"([{"prefix":"/","scheme":null,"upstreams":[{"host":"localhost","port":443}]}])",
+         R"([{"prefix":"/","host":"localhost","scheme":"https"}])"})
+    {
+        ASSERT_EQ(setenv("APIGATE_ROUTES", raw, 1), 0);
+        EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()),
+                     apigate::ConfigError);
+    }
+}
+
+TEST_F(ConfigTest, ExplicitCaMustLoadWithoutHttpsAndNeverEchoesPaths)
+{
+    for (const auto* path : {"", "/dev/null", "/tmp", "/tmp/private-missing-apigate-ca.pem"})
+    {
+        ASSERT_EQ(setenv("APIGATE_UPSTREAM_CA_FILE", path, 1), 0);
+        try
+        {
+            static_cast<void>(apigate::load_config_from_environment());
+            FAIL() << "invalid trust source was accepted";
+        }
+        catch (const apigate::ConfigError& error)
+        {
+            if (!std::string_view{path}.empty())
+            {
+                EXPECT_EQ(std::string_view{error.what()}.find(path), std::string_view::npos);
+            }
+        }
+    }
 }
 
 TEST_F(ConfigTest, ParsesUpstreamPoolsWithDefaultsAndPreservesDuplicateAddressSlots)

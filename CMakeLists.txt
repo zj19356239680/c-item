@@ -15,6 +15,7 @@ find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_beast CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 set(APIGATE_GENERATED_INCLUDE_DIR "${PROJECT_BINARY_DIR}/generated")
 configure_file(
@@ -51,13 +52,14 @@ add_library(apigate_core
     src/http_server.cpp
     src/rate_limit.cpp
     src/route_proxy_admission.cpp
+    src/upstream_tls.cpp
     src/logging.cpp)
 target_include_directories(apigate_core PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(apigate_core
     PUBLIC Boost::beast nlohmann_json::nlohmann_json
-    PRIVATE Boost::asio spdlog::spdlog)
+    PRIVATE Boost::asio spdlog::spdlog OpenSSL::SSL OpenSSL::Crypto)
 apigate_set_project_options(apigate_core)
 
 add_executable(api-gate src/main.cpp)
@@ -132,6 +134,10 @@ if(BUILD_TESTING)
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/load_balance_test.py
                 $<TARGET_FILE:api-gate>)
     set_tests_properties(integration.load_balance PROPERTIES TIMEOUT 30)
+    add_test(NAME integration.https_proxy
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/https_proxy_test.py
+                $<TARGET_FILE:api-gate>)
+    set_tests_properties(integration.https_proxy PROPERTIES TIMEOUT 60)
     add_test(NAME integration.capacity_baseline_smoke
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/capacity-baseline.py
                 $<TARGET_FILE:api-gate> --smoke)

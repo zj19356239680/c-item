@@ -2,6 +2,7 @@
 #define APIGATE_CONFIG_HPP_
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -21,11 +22,20 @@ enum class LogLevel : std::uint8_t
     critical,
 };
 
+enum class UpstreamScheme : std::uint8_t
+{
+    http,
+    https,
+};
+
+class UpstreamTlsContext;
+
 struct UpstreamConfig
 {
     std::string host;
     std::uint16_t port;
     std::uint32_t timeout_ms{3000};
+    UpstreamScheme scheme{UpstreamScheme::http};
 };
 
 struct RateLimitConfig
@@ -55,6 +65,7 @@ struct AppConfig
     std::uint32_t shutdown_grace_ms{5000};
     std::optional<UpstreamConfig> upstream;
     std::vector<RouteConfig> routes;
+    std::shared_ptr<UpstreamTlsContext> upstream_tls_context;
 };
 
 class ConfigError : public std::runtime_error

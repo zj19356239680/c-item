@@ -714,8 +714,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
                 throw std::logic_error("admitted proxy requires an upstream");
             }
             exchange = std::make_shared<HttpProxyExchange>(
-                stream_.get_executor(), *admission.upstream, request, buffer_budget_,
-                request_body_permit_,
+                stream_.get_executor(), *admission.upstream, request, config_.upstream_tls_context,
+                buffer_budget_, request_body_permit_,
                 [weak_self = weak_from_this(), method](ProxyResult result) noexcept
                 {
                     if (const auto self = weak_self.lock())

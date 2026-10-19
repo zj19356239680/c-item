@@ -51,22 +51,22 @@ enum class Command : std::uint8_t
 
 void print_help()
 {
-    std::cout
-        << "Usage: api-gate [--check-config | --help | --version]\n"
-        << "\nEnvironment variables:\n"
-        << "  APIGATE_SERVICE_NAME  Service label (default: api-gate)\n"
-        << "  APIGATE_ENVIRONMENT   Runtime environment (default: development)\n"
-        << "  APIGATE_LOG_LEVEL     trace|debug|info|warn|error|critical\n"
-        << "  APIGATE_LISTEN_ADDRESS IP address to bind (default: 127.0.0.1)\n"
-        << "  APIGATE_LISTEN_PORT   TCP port, 0 selects an ephemeral port (default: 8080)\n"
-        << "  APIGATE_MAX_CONNECTIONS Active downstream connection limit (default: 256)\n"
-        << "  APIGATE_MAX_CONCURRENT_PROXIES Concurrent upstream proxy limit (default: 32)\n"
-        << "  APIGATE_MAX_IN_FLIGHT_BYTES Buffered body reservation budget in bytes "
-           "(default: 67108864)\n"
-        << "  APIGATE_SHUTDOWN_GRACE_MS Drain deadline in milliseconds (default: 5000)\n"
-        << "  APIGATE_UPSTREAM_HOST Optional static HTTP upstream host\n"
-        << "  APIGATE_UPSTREAM_PORT Optional static HTTP upstream port (1-65535)\n"
-        << "  APIGATE_UPSTREAM_TIMEOUT_MS Per-stage timeout in milliseconds (default: 3000)\n";
+    std::cout << "Usage: api-gate [--check-config | --help | --version]\n"
+              << "\nEnvironment variables:\n"
+              << "  APIGATE_SERVICE_NAME  Service label (default: api-gate)\n"
+              << "  APIGATE_ENVIRONMENT   Runtime environment (default: development)\n"
+              << "  APIGATE_LOG_LEVEL     trace|debug|info|warn|error|critical\n"
+              << "  APIGATE_LISTEN_ADDRESS IP address to bind (default: 127.0.0.1)\n"
+              << "  APIGATE_LISTEN_PORT   TCP port, 0 selects an ephemeral port (default: 8080)\n"
+              << "  APIGATE_MAX_CONNECTIONS Active downstream connection limit (default: 256)\n"
+              << "  APIGATE_MAX_CONCURRENT_PROXIES Concurrent upstream proxy limit (default: 32)\n"
+              << "  APIGATE_MAX_IN_FLIGHT_BYTES Buffered body reservation budget in bytes "
+                 "(default: 67108864)\n"
+              << "  APIGATE_SHUTDOWN_GRACE_MS Drain deadline in milliseconds (default: 5000)\n"
+              << "  APIGATE_UPSTREAM_HOST Optional static HTTP upstream host\n"
+              << "  APIGATE_UPSTREAM_PORT Optional static HTTP upstream port (1-65535)\n"
+              << "  APIGATE_UPSTREAM_TIMEOUT_MS Per-stage timeout in milliseconds (default: 3000)\n"
+              << "  APIGATE_UPSTREAM_CA_FILE Optional PEM CA file replacing system HTTPS trust\n";
     std::cout
         << "  APIGATE_ROUTES        Optional JSON array of 1-32 static path routes (max 64 KiB);\n"
         << "                       prefix required; host/port with optional timeout_ms (default "
@@ -74,10 +74,12 @@ void print_help()
         << "                       or upstreams with 1-16 host/port entries (forms exclusive);\n"
         << "                       each timeout_ms defaults to 3000; per-route round robin, no "
            "retry;\n"
+        << "                       scheme is http (default) or https; port is always required;\n"
         << "                       strip_prefix is an optional boolean (default: false);\n"
         << "                       rate_limit optionally requires requests_per_second and burst\n"
         << "                       (integers 1-1000000); omitted means unlimited;\n"
-        << "                       mutually exclusive with APIGATE_UPSTREAM_*\n";
+        << "                       mutually exclusive with legacy upstream host/port/timeout "
+           "variables\n";
 }
 
 void print_version()
