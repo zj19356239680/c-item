@@ -343,11 +343,11 @@ class HealthChecks::Impl : public std::enable_shared_from_this<HealthChecks::Imp
             {
                 continue;
             }
+            const auto& settings = *entry.health_check;
             for (std::size_t upstream = 0; upstream < entry.upstreams.size(); ++upstream)
             {
-                targets_.push_back(
-                    {route, upstream, entry.upstreams[upstream], *entry.health_check});
-                intervals.emplace_back(entry.health_check->interval_ms);
+                targets_.push_back({route, upstream, entry.upstreams[upstream], settings});
+                intervals.emplace_back(settings.interval_ms);
             }
         }
         probes_.resize(targets_.size());
