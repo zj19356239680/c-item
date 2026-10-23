@@ -53,17 +53,17 @@
     {
       "name": "linux-debug",
       "configurePreset": "linux-debug",
-      "jobs": 2
+      "jobs": 3
     },
     {
       "name": "linux-release",
       "configurePreset": "linux-release",
-      "jobs": 2
+      "jobs": 3
     },
     {
       "name": "linux-analysis",
       "configurePreset": "linux-analysis",
-      "jobs": 1
+      "jobs": 2
     }
   ],
   "testPresets": [

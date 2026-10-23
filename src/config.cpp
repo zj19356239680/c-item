@@ -548,6 +548,15 @@ void validate_route_prefix(std::string_view prefix)
 AppConfig load_config_from_environment()
 {
     AppConfig config;
+    if (const auto value = read_environment("APIGATE_UPSTREAM_KEEP_ALIVE"))
+    {
+        const auto& enabled = *value;
+        if (enabled != "true" && enabled != "false")
+        {
+            throw ConfigError("APIGATE_UPSTREAM_KEEP_ALIVE must be true or false");
+        }
+        config.upstream_keep_alive = enabled == "true";
+    }
     if (const auto value = read_environment("APIGATE_METRICS_ENABLED"))
     {
         const auto& enabled = *value;

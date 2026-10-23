@@ -30,6 +30,7 @@
 #include "http_server_internal.hpp"
 #include "metrics.hpp"
 #include "route_proxy_admission.hpp"
+#include "upstream_pool.hpp"
 
 #ifdef APIGATE_HTTP_SESSION_TESTING
 #include "http_session_probe.hpp"
@@ -370,7 +371,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
                 std::shared_ptr<detail::BufferBudgetState> buffer_budget,
                 std::shared_ptr<detail::RouteProxyAdmission> route_admission,
                 std::shared_ptr<detail::Metrics> metrics,
-                std::shared_ptr<detail::AcceptCapacityState> connections, CloseCallback on_close)
+                std::shared_ptr<detail::AcceptCapacityState> connections, CloseCallback on_close,
+                std::shared_ptr<detail::UpstreamPool> pool = nullptr)
         : stream_(std::move(socket)),
           config_(config),
           logger_(logger),
@@ -379,7 +381,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
           route_admission_(std::move(route_admission)),
           metrics_(std::move(metrics)),
           connections_(std::move(connections)),
-          on_close_(std::move(on_close))
+          on_close_(std::move(on_close)),
+          pool_(std::move(pool))
     {
         if (!proxy_admission_)
         {
@@ -765,7 +768,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
                     {
                         self->on_proxy_aborted();
                     }
-                });
+                },
+                pool_);
             proxy_exchange_ = exchange;
             exchange->start();
             parser_.reset();
@@ -1034,6 +1038,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
     std::shared_ptr<detail::AcceptCapacityState> connections_;
     detail::RequestObservation observation_;
     CloseCallback on_close_;
+    std::shared_ptr<detail::UpstreamPool> pool_;
     std::optional<http::request_parser<http::string_body>> parser_;
     std::optional<HttpResponse> response_;
     detail::BufferBudgetPermit response_body_permit_;
@@ -1093,6 +1098,9 @@ class HttpServer::Impl
           route_admission_(
               std::make_shared<detail::RouteProxyAdmission>(config.routes, proxy_admission_)),
           metrics_(config.metrics_enabled ? std::make_shared<detail::Metrics>() : nullptr),
+          pool_(config.upstream_keep_alive
+                    ? std::make_shared<detail::UpstreamPool>(io_context.get_executor())
+                    : nullptr),
           on_runtime_failure_(std::move(on_runtime_failure)),
           on_drain_complete_(std::move(on_drain_complete))
     {
@@ -1305,13 +1313,14 @@ class HttpServer::Impl
             return;
         }
 
-        auto session = std::make_shared<HttpSession>(std::move(socket), config_, logger_,
-                                                     proxy_admission_, buffer_budget_,
-                                                     route_admission_, metrics_, accept_capacity_,
-                                                     [this](HttpSession* closed_session)
-                                                     {
-                                                         remove_session(closed_session);
-                                                     });
+        auto session = std::make_shared<HttpSession>(
+            std::move(socket), config_, logger_, proxy_admission_, buffer_budget_, route_admission_,
+            metrics_, accept_capacity_,
+            [this](HttpSession* closed_session)
+            {
+                remove_session(closed_session);
+            },
+            pool_);
         sessions_.insert(session);
         accept_capacity_->session_started();
         drain_state_.session_started();
@@ -1402,6 +1411,10 @@ class HttpServer::Impl
 
     void stop_accepting() noexcept
     {
+        if (pool_)
+        {
+            pool_->stop();
+        }
         health_checks_->stop();
         accept_capacity_->stop();
         try
@@ -1595,6 +1608,7 @@ class HttpServer::Impl
     std::shared_ptr<detail::BufferBudgetState> buffer_budget_;
     std::shared_ptr<detail::RouteProxyAdmission> route_admission_;
     std::shared_ptr<detail::Metrics> metrics_;
+    std::shared_ptr<detail::UpstreamPool> pool_;
     std::function<void()> on_runtime_failure_;
     std::unique_ptr<detail::HealthChecks> health_checks_;
     std::function<void()> on_drain_complete_;

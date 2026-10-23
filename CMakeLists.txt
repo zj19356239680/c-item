@@ -52,6 +52,7 @@ add_library(apigate_core
     src/metrics.cpp
     src/health_state.cpp
     src/http_handler.cpp
+    src/upstream_pool.cpp
     src/http_proxy.cpp
     src/http_server.cpp
     src/rate_limit.cpp
@@ -82,6 +83,7 @@ if(BUILD_TESTING)
         tests/unit/metrics_test.cpp
         tests/unit/health_check_test.cpp
         tests/unit/http_handler_test.cpp
+        tests/unit/upstream_pool_test.cpp
         tests/unit/http_proxy_test.cpp
         tests/unit/http_server_test.cpp
         tests/unit/rate_limit_test.cpp
@@ -129,6 +131,10 @@ if(BUILD_TESTING)
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/body_timeout_test.py
                 $<TARGET_FILE:api-gate>)
     set_tests_properties(integration.body_timeout PROPERTIES TIMEOUT 45)
+    add_test(NAME integration.upstream_pool
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/upstream_pool_test.py
+                $<TARGET_FILE:api-gate>)
+    set_tests_properties(integration.upstream_pool PROPERTIES TIMEOUT 60)
     add_test(NAME integration.http_proxy
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/http_proxy_test.py
                 $<TARGET_FILE:api-gate>)

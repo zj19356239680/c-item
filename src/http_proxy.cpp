@@ -19,6 +19,7 @@
 #include <string>
 #include <utility>
 
+#include "upstream_pool.hpp"
 #include "upstream_tls.hpp"
 
 namespace apigate
@@ -163,7 +164,8 @@ std::string make_upstream_authority(std::string_view host, std::uint16_t port)
     return std::string{host} + ':' + port_text;
 }
 
-HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRequest& request)
+HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRequest& request,
+                                  bool keep_alive)
 {
     const auto& config = selected.upstream;
     std::string_view target{request.target().data(), request.target().size()};
@@ -193,7 +195,7 @@ HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRe
         upstream.insert(field.name_string(), field.value());
     }
     upstream.set(http::field::host, make_upstream_authority(config.host, config.port));
-    upstream.set(http::field::connection, "close");
+    upstream.keep_alive(keep_alive);
     upstream.body() = request.body();
     if (request.method() != http::verb::get)
     {
@@ -237,14 +239,15 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
          const HttpRequest& request, std::shared_ptr<UpstreamTlsContext> tls_context,
          std::shared_ptr<detail::BufferBudgetState> buffer_budget,
          std::shared_ptr<detail::BufferBudgetPermit> request_body_permit,
-         CompletionCallback on_complete, AbortCallback on_abort)
+         CompletionCallback on_complete, AbortCallback on_abort,
+         std::shared_ptr<detail::UpstreamPool> pool)
         : tls_context_(std::move(tls_context)),
           resolver_(executor),
-          stream_(executor),
+          pool_(std::move(pool)),
           deadline_(executor),
           config_(selected.upstream),
           downstream_request_(request),
-          upstream_request_(detail::make_upstream_request(selected, request)),
+          upstream_request_(detail::make_upstream_request(selected, request, pool_ != nullptr)),
           buffer_budget_(std::move(buffer_budget)),
           request_body_permit_(std::move(request_body_permit)),
           on_complete_(std::move(on_complete)),
@@ -262,13 +265,15 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
         {
             throw std::invalid_argument("proxy abort callback must not be empty");
         }
-        if (config_.scheme == UpstreamScheme::https)
+        if (pool_)
         {
-            if (!tls_context_)
-            {
-                throw std::invalid_argument("HTTPS requires a validated TLS context");
-            }
-            tls_stream_ = std::make_unique<TlsStream>(std::move(stream_), tls_context_->context);
+            connection_ = pool_->take(config_, tls_context_);
+        }
+        reused_ = connection_ != nullptr;
+        if (!connection_)
+        {
+            connection_ =
+                std::make_unique<detail::UpstreamConnection>(executor, config_, tls_context_);
         }
         response_parser_.body_limit(max_upstream_body_bytes);
         response_parser_.header_limit(max_upstream_header_bytes);
@@ -276,6 +281,11 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
 
     void start()
     {
+        if (reused_)
+        {
+            write_request();
+            return;
+        }
         begin_deadline();
         resolver_.async_resolve(
             config_.host, std::to_string(config_.port),
@@ -306,19 +316,19 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
 
     [[nodiscard]] beast::tcp_stream& transport() noexcept
     {
-        return tls_stream_ ? beast::get_lowest_layer(*tls_stream_) : stream_;
+        return connection_->transport();
     }
 
     template <typename Action>
     void with_stream(Action&& action)
     {
-        if (tls_stream_)
+        if (auto* tls = connection_->tls())
         {
-            std::forward<Action>(action)(*tls_stream_);
+            std::forward<Action>(action)(*tls);
         }
         else
         {
-            std::forward<Action>(action)(stream_);
+            std::forward<Action>(action)(connection_->transport());
         }
     }
 
@@ -397,25 +407,24 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
             fail(ProxyFailureStage::connect, error);
             return;
         }
-        if (tls_stream_)
+        if (auto* tls = connection_->tls())
         {
-            if (!configure_upstream_tls_identity(*tls_stream_, config_.host))
+            if (!configure_upstream_tls_identity(*tls, config_.host))
             {
                 fail(ProxyFailureStage::handshake, asio::error::invalid_argument);
                 return;
             }
             begin_deadline();
-            tls_stream_->async_handshake(
-                asio::ssl::stream_base::client,
-                [self =
-                     shared_from_this()](const boost::system::error_code& handshake_error) noexcept
-                {
-                    self->run_handler(
-                        [self, &handshake_error]
-                        {
-                            self->on_handshake(handshake_error);
-                        });
-                });
+            tls->async_handshake(asio::ssl::stream_base::client,
+                                 [self = shared_from_this()](
+                                     const boost::system::error_code& handshake_error) noexcept
+                                 {
+                                     self->run_handler(
+                                         [self, &handshake_error]
+                                         {
+                                             self->on_handshake(handshake_error);
+                                         });
+                                 });
             return;
         }
         write_request();
@@ -577,8 +586,23 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
 
     void finish_response()
     {
+        // Decide from the ORIGINAL upstream framing, before downstream headers are rebuilt.
+        const auto& original = response_parser_.get();
+        const bool reusable = pool_ && response_parser_.is_done() && !response_parser_.need_eof() &&
+                              original.keep_alive() && original.result_int() >= 200U &&
+                              original.find(http::field::upgrade) == original.end() &&
+                              !connection_tokens(original.base()).contains("upgrade") &&
+                              buffer_.size() == 0 && connection_->clean();
         auto upstream_response = response_parser_.release();
-        close_upstream();
+        finish_deadline();
+        if (reusable)
+        {
+            pool_->put(std::move(connection_));
+        }
+        else
+        {
+            close_upstream();
+        }
         auto response =
             detail::make_downstream_response(downstream_request_, std::move(upstream_response));
         ProxyResult result{std::move(response), std::nullopt, std::nullopt,
@@ -705,39 +729,18 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
 
     void close_upstream() noexcept
     {
-        // Each exchange closes its connection. Once HTTP framing is complete, do not wait
-        // for TLS close_notify. Before completion, TLS truncation remains a read failure.
-        auto& socket = transport().socket();
-        if (!socket.is_open())
+        // Completed pooled leases have already moved away. Old timer/cancel callbacks
+        // can only discard a lease still owned by this exchange.
+        if (connection_)
         {
-            return;
-        }
-        boost::system::error_code operation_error;
-        const auto cancel_error = socket.cancel(operation_error);
-        if (cancel_error && cancel_error != asio::error::not_connected)
-        {
-            write_proxy_fallback_diagnostic("http_proxy_socket_cancel_failed",
-                                            cancel_error.value());
-        }
-        operation_error.clear();
-        const auto shutdown_error = socket.shutdown(tcp::socket::shutdown_both, operation_error);
-        if (shutdown_error && shutdown_error != asio::error::not_connected)
-        {
-            write_proxy_fallback_diagnostic("http_proxy_socket_shutdown_failed",
-                                            shutdown_error.value());
-        }
-        operation_error.clear();
-        const auto close_error = socket.close(operation_error);
-        if (close_error)
-        {
-            write_proxy_fallback_diagnostic("http_proxy_socket_close_failed", close_error.value());
+            connection_->close();
         }
     }
 
     std::shared_ptr<UpstreamTlsContext> tls_context_;
     tcp::resolver resolver_;
-    beast::tcp_stream stream_;
-    std::unique_ptr<TlsStream> tls_stream_;
+    std::shared_ptr<detail::UpstreamPool> pool_;
+    detail::UpstreamLease connection_;
     asio::steady_timer deadline_;
     UpstreamConfig config_;
     HttpRequest downstream_request_;
@@ -752,6 +755,7 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
     detail::ProxyCompletionState completion_state_;
     std::uint64_t deadline_generation_{0};
     bool completion_observed_{false};
+    bool reused_{false};
 };
 
 HttpProxyExchange::HttpProxyExchange(
@@ -759,13 +763,13 @@ HttpProxyExchange::HttpProxyExchange(
     const HttpRequest& request, std::shared_ptr<UpstreamTlsContext> tls_context,
     std::shared_ptr<detail::BufferBudgetState> buffer_budget,
     std::shared_ptr<detail::BufferBudgetPermit> request_body_permit, CompletionCallback on_complete,
-    AbortCallback on_abort)
+    AbortCallback on_abort, std::shared_ptr<detail::UpstreamPool> pool)
     // Boost.Asio's resolver service calls its final shutdown hook during service destruction;
     // the analyzer reports this library-owned, non-polymorphic cleanup as virtual dispatch.
     // NOLINTNEXTLINE(clang-analyzer-optin.cplusplus.VirtualCall)
     : impl_(std::make_shared<Impl>(executor, selected, request, std::move(tls_context),
                                    std::move(buffer_budget), std::move(request_body_permit),
-                                   std::move(on_complete), std::move(on_abort)))
+                                   std::move(on_complete), std::move(on_abort), std::move(pool)))
 {
 }
 

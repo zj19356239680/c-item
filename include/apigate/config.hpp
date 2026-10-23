@@ -74,6 +74,7 @@ struct AppConfig
     std::uint64_t max_in_flight_bytes{67108864};
     std::uint32_t shutdown_grace_ms{5000};
     bool metrics_enabled{false};
+    bool upstream_keep_alive{false};
     std::optional<UpstreamConfig> upstream;
     std::vector<RouteConfig> routes;
     std::shared_ptr<UpstreamTlsContext> upstream_tls_context;

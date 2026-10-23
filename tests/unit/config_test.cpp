@@ -80,6 +80,7 @@ class ConfigTest : public testing::Test
         unsetenv("APIGATE_MAX_CONCURRENT_PROXIES");
         unsetenv("APIGATE_MAX_IN_FLIGHT_BYTES");
         unsetenv("APIGATE_SHUTDOWN_GRACE_MS");
+        unsetenv("APIGATE_UPSTREAM_KEEP_ALIVE");
         unsetenv("APIGATE_UPSTREAM_HOST");
         unsetenv("APIGATE_UPSTREAM_PORT");
         unsetenv("APIGATE_UPSTREAM_TIMEOUT_MS");
@@ -103,9 +104,34 @@ TEST_F(ConfigTest, UsesSafeDefaults)
     EXPECT_EQ(config.max_in_flight_bytes, 67108864U);
     EXPECT_EQ(config.shutdown_grace_ms, 5000U);
     EXPECT_FALSE(config.metrics_enabled);
+    EXPECT_FALSE(config.upstream_keep_alive);
     EXPECT_FALSE(config.upstream.has_value());
     EXPECT_TRUE(config.routes.empty());
     EXPECT_FALSE(config.upstream_tls_context);
+}
+
+TEST_F(ConfigTest, UpstreamKeepAliveIsStrictAndDoesNotEchoInput)
+{
+    for (const auto* value : {"true", "false"})
+    {
+        ASSERT_EQ(setenv("APIGATE_UPSTREAM_KEEP_ALIVE", value, 1), 0);
+        EXPECT_EQ(apigate::load_config_from_environment().upstream_keep_alive,
+                  std::string_view{value} == "true");
+    }
+    for (const auto* value : {"", "TRUE", "False", "0", " true", "false ", "private-marker"})
+    {
+        ASSERT_EQ(setenv("APIGATE_UPSTREAM_KEEP_ALIVE", value, 1), 0);
+        try
+        {
+            static_cast<void>(apigate::load_config_from_environment());
+            FAIL() << "expected invalid boolean rejection";
+        }
+        catch (const apigate::ConfigError& error)
+        {
+            EXPECT_EQ(std::string_view{error.what()}.find("private-marker"),
+                      std::string_view::npos);
+        }
+    }
 }
 
 TEST_F(ConfigTest, MetricsBooleanIsStrictAndDoesNotEchoInput)

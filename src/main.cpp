@@ -65,6 +65,8 @@ void print_help()
               << "  APIGATE_SHUTDOWN_GRACE_MS Drain deadline in milliseconds (default: 5000)\n"
               << "  APIGATE_METRICS_ENABLED true|false (default: false); expose GET /metrics to "
                  "listener clients\n"
+              << "  APIGATE_UPSTREAM_KEEP_ALIVE true|false (default: false); reuse HTTP/HTTPS "
+                 "connections\n"
               << "  APIGATE_UPSTREAM_HOST Optional static HTTP upstream host\n"
               << "  APIGATE_UPSTREAM_PORT Optional static HTTP upstream port (1-65535)\n"
               << "  APIGATE_UPSTREAM_TIMEOUT_MS Per-stage timeout in milliseconds (default: 3000)\n"
@@ -145,6 +147,7 @@ int main(int argc, char* argv[])
                 {"max_in_flight_bytes", config.max_in_flight_bytes},
                 {"shutdown_grace_ms", config.shutdown_grace_ms},
                 {"metrics_enabled", config.metrics_enabled},
+                {"upstream_keep_alive", config.upstream_keep_alive},
                 {"proxy_enabled", config.upstream.has_value() || !config.routes.empty()}};
             if (!config.routes.empty())
             {

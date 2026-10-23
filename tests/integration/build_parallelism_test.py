@@ -39,10 +39,11 @@ class BuildParallelismTest(unittest.TestCase):
                 APIGATE_TEST_BUILD_CALLS=str(calls),
             )
             cases = [
-                ("linux-analysis", None, "1"),
-                ("linux-debug", None, "2"),
-                ("linux-release", None, "2"),
+                ("linux-analysis", None, "2"),
+                ("linux-debug", None, "3"),
+                ("linux-release", None, "3"),
                 ("linux-analysis", "3", "3"),
+                ("linux-analysis", "1", "1"),
                 ("linux-debug", "1", "1"),
                 ("linux-analysis", "", None),
                 ("linux-analysis", "0", None),
@@ -79,7 +80,7 @@ class BuildParallelismTest(unittest.TestCase):
     def test_direct_build_presets_are_bounded(self):
         presets = json.loads((ROOT / "CMakePresets.json").read_text())
         jobs = {preset["name"]: preset["jobs"] for preset in presets["buildPresets"]}
-        self.assertEqual(jobs, {"linux-debug": 2, "linux-release": 2, "linux-analysis": 1})
+        self.assertEqual(jobs, {"linux-debug": 3, "linux-release": 3, "linux-analysis": 2})
 
 
 if __name__ == "__main__":

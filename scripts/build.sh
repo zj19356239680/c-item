@@ -18,9 +18,9 @@ case "${preset}" in
 esac
 
 # clang-tidy and template-heavy compilation can exhaust small WSL instances.
-default_jobs=2
+default_jobs=3
 if [[ "${preset}" == linux-analysis ]]; then
-    default_jobs=1
+    default_jobs=2
 fi
 build_jobs="${CMAKE_BUILD_PARALLEL_LEVEL-${default_jobs}}"
 if [[ ! "${build_jobs}" =~ ^[1-9][0-9]*$ ]]; then
