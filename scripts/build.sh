@@ -17,6 +17,17 @@ case "${preset}" in
         ;;
 esac
 
+# clang-tidy and template-heavy compilation can exhaust small WSL instances.
+default_jobs=2
+if [[ "${preset}" == linux-analysis ]]; then
+    default_jobs=1
+fi
+build_jobs="${CMAKE_BUILD_PARALLEL_LEVEL-${default_jobs}}"
+if [[ ! "${build_jobs}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer" >&2
+    exit 2
+fi
+
 cd "${project_root}"
 cache_file="${project_root}/build/${preset}/CMakeCache.txt"
 configure_arguments=(--preset "${preset}")
@@ -30,4 +41,5 @@ fi
 
 retry_with_backoff "CMake configure and dependency installation" 3 1200 2 \
     cmake "${configure_arguments[@]}"
-cmake --build --preset "${preset}" --parallel
+echo "Building ${preset} with at most ${build_jobs} parallel jobs"
+cmake --build --preset "${preset}" --parallel "${build_jobs}"

@@ -13,7 +13,7 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-        "VCPKG_INSTALLED_DIR": "$env{HOME}/.cache/apigate/vcpkg/installed/${presetName}",
+        "APIGATE_DEPENDENCY_PRESET": "${presetName}",
         "VCPKG_TARGET_TRIPLET": "x64-linux",
         "VCPKG_MANIFEST_FEATURES": "tests",
         "BUILD_TESTING": "ON",
@@ -52,15 +52,18 @@
   "buildPresets": [
     {
       "name": "linux-debug",
-      "configurePreset": "linux-debug"
+      "configurePreset": "linux-debug",
+      "jobs": 2
     },
     {
       "name": "linux-release",
-      "configurePreset": "linux-release"
+      "configurePreset": "linux-release",
+      "jobs": 2
     },
     {
       "name": "linux-analysis",
-      "configurePreset": "linux-analysis"
+      "configurePreset": "linux-analysis",
+      "jobs": 1
     }
   ],
   "testPresets": [

@@ -80,6 +80,23 @@ bool should_proxy_http_request(const AppConfig& config, const HttpRequest& reque
     return select_http_route(config, request).has_value();
 }
 
+bool is_metrics_target(const AppConfig& config, std::string_view target) noexcept
+{
+    return config.metrics_enabled && request_path(target) == "/metrics";
+}
+
+HttpResponse make_metrics_response(const HttpRequest& request, std::string body)
+{
+    HttpResponse response{http::status::ok, request.version()};
+    response.set(http::field::server, "ApiGate");
+    response.set(http::field::content_type, "text/plain; version=0.0.4; charset=utf-8");
+    response.set(http::field::cache_control, "no-store");
+    response.keep_alive(request.keep_alive());
+    response.body() = std::move(body);
+    response.prepare_payload();
+    return response;
+}
+
 std::optional<SelectedRoute> select_http_route(const AppConfig& config,
                                                const HttpRequest& request) noexcept
 {
@@ -88,7 +105,7 @@ std::optional<SelectedRoute> select_http_route(const AppConfig& config,
         return std::nullopt;
     }
     const std::string_view target{request.target().data(), request.target().size()};
-    if (classify_http_route(target) != "unmatched")
+    if (classify_http_route(target) != "unmatched" || is_metrics_target(config, target))
     {
         return std::nullopt;
     }
@@ -124,6 +141,22 @@ HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& req
     const std::string_view target{request.target().data(), request.target().size()};
     const auto route = classify_http_route(target);
     const bool proxy_enabled = config.upstream.has_value() || !config.routes.empty();
+    if (is_metrics_target(config, target))
+    {
+        if (request.method() != http::verb::get)
+        {
+            return make_method_not_allowed(request, false);
+        }
+        if (!request.body().empty() || requests_upgrade(request))
+        {
+            return make_json_response(
+                request, http::status::bad_request,
+                {{"error",
+                  {{"code", "unsupported_request"}, {"message", "invalid metrics request"}}}});
+        }
+        // Runtime state is supplied by the session after protocol validation.
+        return make_metrics_response(request, {});
+    }
     if (route != "unmatched" && request.method() != http::verb::get)
     {
         return make_method_not_allowed(request, false);

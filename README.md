@@ -134,6 +134,13 @@ bash scripts/run.sh --version
 ```
 
 `check.sh` 包含格式检查、clang-tidy、警告即错误、ASan/UBSan 构建和测试。
+构建脚本默认限制并发：分析构建为 1，Debug/Release 为 2，避免多个重型
+clang-tidy/编译进程同时挤占 WSL 资源。直接使用构建预设也采用相同默认值。
+需要调整时可运行 `CMAKE_BUILD_PARALLEL_LEVEL=1 bash scripts/check.sh`，或
+`CMAKE_BUILD_PARALLEL_LEVEL=2 bash scripts/build.sh linux-debug`；脚本只接受
+正整数，空值和 0 会在配置前拒绝。直接调用 CMake 时使用 `--parallel N` 覆盖预设。
+这是单次项目构建的并发限制，不是内存硬上限；不限制依赖安装或多个独立构建的
+合计负载。低内存环境仍应避免同时启动多个构建，必要时将普通构建也降为 1。
 系统工具装好后，也可运行 `bash scripts/bootstrap.sh`，它依次准备 vcpkg 依赖并执行
 `check.sh`。`run.sh --check-config` 仍会按所选预设构建程序，但程序只校验
 配置并退出，不创建监听 socket；因此它不能发现端口占用。配置合法时，程序在标准
@@ -207,6 +214,7 @@ bash scripts/check.sh
 | `APIGATE_LOG_LEVEL` | `info` | `trace`、`debug`、`info`、`warn`、`error`、`critical` |
 | `APIGATE_LISTEN_ADDRESS` | `127.0.0.1` | IPv4/IPv6 字面地址，不解析主机名 |
 | `APIGATE_LISTEN_PORT` | `8080` | 0–65535；0 由内核分配临时端口 |
+| `APIGATE_METRICS_ENABLED` | `false` | 严格 true/false；在现有监听器暴露无认证的 GET /metrics |
 | `APIGATE_MAX_CONNECTIONS` | `256` | 1–65535；活动下游连接数上限 |
 | `APIGATE_MAX_CONCURRENT_PROXIES` | `32` | 1–65535；并发上游代理交换数上限 |
 | `APIGATE_MAX_IN_FLIGHT_BYTES` | `67108864` | 1–1073741824；全局缓冲正文预约预算，单位字节 |
@@ -338,6 +346,46 @@ null、未知或重复字段。前者是每秒补充的令牌数，后者是最�
 正常 429 沿用低敏感度 `http_request_completed` 日志，不记录路径、query 或正文，
 不误报上游错误；实际容量和性能仍需在目标负载下测量。
 
+### 请求指标与运行状态
+
+`APIGATE_METRICS_ENABLED` 默认 `false`，严格接受 `true` 或 `false`；空值及其他值在监听前
+拒绝，`--check-config` 报告 `metrics_enabled`。启用后使用原监听器，无新端口：
+
+```bash
+APIGATE_METRICS_ENABLED=true bash scripts/run.sh
+curl -sS http://127.0.0.1:8080/metrics
+```
+
+端点没有认证，可被能够访问现有监听器的客户端读取；监听地址由用户配置，不能假定仅本机
+可访问。启用时精确 `/metrics`（忽略 query）优先于代理路由；GET 返回指标，其他方法返回
+405 / `Allow: GET`，非空 GET 正文及协议问题安全拒绝。`/metrics-other` 不匹配；已选代理路由
+剥离后形成 `/metrics` 仍发往上游。关闭时不保留该路径，完全沿用原路由行为。
+`/healthz`、`/readyz` 语义不变。指标请求不访问上游，不消费路由令牌或代理名额。
+
+输出采用 [Prometheus Text Format 0.0.4](https://prometheus.io/docs/instrumenting/exposition_formats/)，
+UTF-8、LF，末行有 LF；`Content-Type: text/plain; version=0.0.4; charset=utf-8`，
+`Cache-Control: no-store`。指标如下：
+
+| 指标 | 含义与排除项 |
+| --- | --- |
+| `apigate_http_responses_total{status="200"}` | 为下游生成的最终响应数，不保证成功送达；本地、代理及早期协议拒绝均统计，每请求最多一次，写失败不重计，直接关闭无状态。status 固定为 100–599 或 other。 |
+| `apigate_rejections_total{reason="rate_limit"}` | 实际本地准入拒绝，固定 reason 为 rate_limit、proxy_capacity、buffer_capacity、no_healthy_upstream；上游自己返回 429/503 不算。 |
+| `apigate_upstream_failures_total{stage="timeout"}` | 业务代理失败，固定 stage 为 resolve、connect、handshake、write、read、timeout、response_too_large、invalid_response；排除健康探测、正常取消和普通上游 4xx/5xx。 |
+| `apigate_request_processing_seconds_sum`、`_count` | 无 quantile 的 summary：单调时钟，从完整请求进入 process_request 到最终响应准备进入下游写出。包含业务上游处理，不含请求头等待、正文上传或下游写出。早期解析拒绝和未生成最终响应的取消不计样本，因此统计集合与响应计数不同。 |
+| `apigate_active_connections`、`apigate_max_connections` | 真实当前下游连接数（包含抓取连接）及上限；连接容量通过暂停 accept 背压，不生成虚构的拒绝指标。 |
+| `apigate_active_proxies`、`apigate_max_concurrent_proxies` | 现有业务代理 permit 占用及上限。 |
+| `apigate_in_flight_body_bytes`、`apigate_max_in_flight_body_bytes` | 现有逻辑正文预算占用及上限，单位字节。 |
+| `apigate_upstream_available{route_index="0",upstream_index="0"}` | 静态路由槽位允许轮询选择为 1，健康检查摘除为 0；初始及未启用检查为 1，不表示已检测健康或公网可达。同地址槽位不合并，旧环境变量单上游模式不输出此样本。 |
+
+本地指标请求（包括其方法/协议拒绝）不进入累计响应、拒绝、失败及耗时统计；重复抓取不重置
+或污染累计值，资源 gauge 始终反映真实占用。单进程统计，重启清零。整数计数达到 uint64
+上限后饱和，耗时总和有限且饱和，不回绕、不输出 NaN/Inf。
+
+标签不含路径、前缀、地址、query、正文、客户端或凭据。累计状态固定大小，最多 1033 条时间
+序列（含 32×16 个槽位），每个响应正文硬上限 128 KiB。指标正文沿用本地控制响应边界，
+不计入业务代理正文预算，也不扩大该预算；每个抓取仍有额外有界的渲染、正文与写出开销，
+逻辑正文预算不是 RSS 上限。没有持久化、告警、百分位数、监控平台或生产容量保证。
+
 ### 主动健康检查与故障摘除
 
 路由可选 health_check，省略即关闭；单后端和 upstreams 数组形式均支持。旧
@@ -426,8 +474,11 @@ bash scripts/container-smoke.sh
 - 首次依赖下载失败：保留缓存后重试。下载缓存默认为
   `${XDG_CACHE_HOME:-$HOME/.cache}/vcpkg/downloads`，二进制包缓存默认为
   `${XDG_CACHE_HOME:-$HOME/.cache}/vcpkg/archives`；可分别通过 `VCPKG_DOWNLOADS`
-  和 `VCPKG_DEFAULT_BINARY_CACHE` 覆盖。按预设隔离的已安装依赖仍位于
-  `~/.cache/apigate/vcpkg/installed`。这些缓存不是完整离线镜像；清理后，后续构建
+  和 `VCPKG_DEFAULT_BINARY_CACHE` 覆盖。按预设隔离的已安装依赖默认为
+  `${XDG_CACHE_HOME:-$HOME/.cache}/apigate/vcpkg/installed/<preset>`；脚本和直接使用
+  CMake Preset 时均适用。显式 `-DVCPKG_INSTALLED_DIR=...` 或已有 CMake 缓存值优先；
+  修改 XDG_CACHE_HOME 后，如需切换已有构建的默认位置，应使用 `cmake --fresh --preset ...`
+  重新配置，不会自动迁移或删除旧目录。这些缓存不是完整离线镜像；清理后，后续构建
   可能需要重新联网下载或编译依赖。
 - Docker 权限不足：确认守护进程可用，以及当前用户是否有权访问 Docker socket。
   如仅 Docker 构建网络下载超时，可在可信的 Linux 开发环境中使用

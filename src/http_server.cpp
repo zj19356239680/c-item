@@ -28,6 +28,7 @@
 #include "buffer_budget.hpp"
 #include "http_proxy.hpp"
 #include "http_server_internal.hpp"
+#include "metrics.hpp"
 #include "route_proxy_admission.hpp"
 
 #ifdef APIGATE_HTTP_SESSION_TESTING
@@ -368,13 +369,16 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
                 std::shared_ptr<detail::ProxyAdmissionState> proxy_admission,
                 std::shared_ptr<detail::BufferBudgetState> buffer_budget,
                 std::shared_ptr<detail::RouteProxyAdmission> route_admission,
-                CloseCallback on_close)
+                std::shared_ptr<detail::Metrics> metrics,
+                std::shared_ptr<detail::AcceptCapacityState> connections, CloseCallback on_close)
         : stream_(std::move(socket)),
           config_(config),
           logger_(logger),
           proxy_admission_(std::move(proxy_admission)),
           buffer_budget_(std::move(buffer_budget)),
           route_admission_(std::move(route_admission)),
+          metrics_(std::move(metrics)),
+          connections_(std::move(connections)),
           on_close_(std::move(on_close))
     {
         if (!proxy_admission_)
@@ -473,6 +477,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
             return;
         }
 
+        observation_ = {};
         phase_ = detail::SessionPhase::reading;
         parser_.emplace();
         parser_->header_limit(max_header_bytes);
@@ -494,6 +499,10 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
 
     void on_read_header(const boost::system::error_code& error)
     {
+        if (parser_)
+        {
+            observation_.exclude(is_metrics_target(config_, parser_->get().target()));
+        }
         if (finished_)
         {
             return;
@@ -596,6 +605,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
             close_socket();
             return;
         }
+        observation_.begin(detail::RequestObservation::Clock::now());
         ++requests_served_;
         const auto& request = parser_->get();
         if (const auto route = select_http_route(config_, request))
@@ -605,6 +615,16 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
             return;
         }
         auto response = handle_http_request(config_, request);
+        if (is_metrics_target(config_, request.target()) && response.result() == http::status::ok)
+        {
+            if (!metrics_ || !connections_)
+            {
+                throw std::logic_error("metrics runtime state is missing");
+            }
+            response = make_metrics_response(
+                request, metrics_->render(config_, *connections_, *proxy_admission_,
+                                          *buffer_budget_, *route_admission_->health_state()));
+        }
         if (requests_served_ >= max_requests_per_connection)
         {
             response.keep_alive(false);
@@ -666,6 +686,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
 
     void reject_buffer_budget(const HttpRequest& request, std::uint64_t requested_bytes)
     {
+        observation_.reject(metrics_.get(), detail::RejectionReason::buffer_capacity);
         auto response =
             make_gateway_error_response(request, GatewayFailure::buffer_capacity_exhausted);
         response.keep_alive(false);
@@ -685,6 +706,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
                 route_admission_->try_acquire(route, detail::TokenBucket::Clock::now());
             if (!admission.rate_limit.allowed)
             {
+                observation_.reject(metrics_.get(), detail::RejectionReason::rate_limit);
                 auto response =
                     make_rate_limited_response(request, admission.rate_limit.retry_after_seconds);
                 if (requests_served_ >= max_requests_per_connection)
@@ -697,6 +719,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
             }
             if (admission.no_healthy_upstream)
             {
+                observation_.reject(metrics_.get(), detail::RejectionReason::no_healthy_upstream);
                 auto response =
                     make_gateway_error_response(request, GatewayFailure::no_healthy_upstream);
                 if (requests_served_ >= max_requests_per_connection)
@@ -710,6 +733,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
             proxy_permit_ = std::move(admission.permit);
             if (!proxy_permit_)
             {
+                observation_.reject(metrics_.get(), detail::RejectionReason::proxy_capacity);
                 auto response =
                     make_gateway_error_response(request, GatewayFailure::gateway_overloaded);
                 if (requests_served_ >= max_requests_per_connection)
@@ -758,6 +782,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
             try
             {
                 auto response = make_gateway_error_response(request, GatewayFailure::bad_gateway);
+                observation_.fail(metrics_.get(), ProxyFailureStage::connect);
                 log_proxy_failure(ProxyFailure{ProxyFailureStage::connect, 0},
                                   response.result_int());
                 log_request_completed(proxy_method_name(method), "proxy", response.result_int());
@@ -777,7 +802,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         {
             proxy_exchange_.reset();
             proxy_permit_.reset();
-            if (finished_ || stopping_)
+            if (finished_ || stopping_ || observation_.completed())
             {
                 return;
             }
@@ -787,10 +812,13 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
             }
             if (result.failure)
             {
-                log_proxy_failure(*result.failure, result.response.result_int());
+                const auto& failure = *result.failure;
+                observation_.fail(metrics_.get(), failure.stage);
+                log_proxy_failure(failure, result.response.result_int());
             }
             if (result.buffer_budget_rejected_bytes)
             {
+                observation_.reject(metrics_.get(), detail::RejectionReason::buffer_capacity);
                 log_buffer_budget_rejection("response", *result.buffer_budget_rejected_bytes,
                                             result.response.result_int());
             }
@@ -880,6 +908,12 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
 
     void write_response(HttpResponse response, detail::BufferBudgetPermit body_permit = {})
     {
+        if (finished_ || stopping_ ||
+            !observation_.finish(metrics_.get(), response.result_int(),
+                                 detail::RequestObservation::Clock::now()))
+        {
+            return;
+        }
         phase_ = detail::SessionPhase::writing;
         if (draining_)
         {
@@ -996,6 +1030,9 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
     std::shared_ptr<detail::ProxyAdmissionState> proxy_admission_;
     std::shared_ptr<detail::BufferBudgetState> buffer_budget_;
     std::shared_ptr<detail::RouteProxyAdmission> route_admission_;
+    std::shared_ptr<detail::Metrics> metrics_;
+    std::shared_ptr<detail::AcceptCapacityState> connections_;
+    detail::RequestObservation observation_;
     CloseCallback on_close_;
     std::optional<http::request_parser<http::string_body>> parser_;
     std::optional<HttpResponse> response_;
@@ -1020,13 +1057,13 @@ detail::SessionWriteProbe detail::start_session_write_probe(
     std::function<void()> on_close)
 {
     auto route_admission = std::make_shared<RouteProxyAdmission>(config.routes, admission);
-    auto session =
-        std::make_shared<HttpSession>(std::move(socket), config, logger, std::move(admission),
-                                      std::move(budget), std::move(route_admission),
-                                      [on_close = std::move(on_close)](HttpSession*)
-                                      {
-                                          on_close();
-                                      });
+    auto session = std::make_shared<HttpSession>(std::move(socket), config, logger,
+                                                 std::move(admission), std::move(budget),
+                                                 std::move(route_admission), nullptr, nullptr,
+                                                 [on_close = std::move(on_close)](HttpSession*)
+                                                 {
+                                                     on_close();
+                                                 });
     session->start();
     return {[session]
             {
@@ -1049,12 +1086,13 @@ class HttpServer::Impl
           acceptor_(io_context),
           accept_retry_timer_(io_context),
           drain_timer_(io_context),
-          accept_capacity_(config.max_connections),
+          accept_capacity_(std::make_shared<detail::AcceptCapacityState>(config.max_connections)),
           proxy_admission_(
               std::make_shared<detail::ProxyAdmissionState>(config.max_concurrent_proxies)),
           buffer_budget_(std::make_shared<detail::BufferBudgetState>(config.max_in_flight_bytes)),
           route_admission_(
               std::make_shared<detail::RouteProxyAdmission>(config.routes, proxy_admission_)),
+          metrics_(config.metrics_enabled ? std::make_shared<detail::Metrics>() : nullptr),
           on_runtime_failure_(std::move(on_runtime_failure)),
           on_drain_complete_(std::move(on_drain_complete))
     {
@@ -1215,7 +1253,7 @@ class HttpServer::Impl
         {
             return;
         }
-        switch (accept_capacity_.next_action())
+        switch (accept_capacity_->next_action())
         {
             case detail::AcceptCapacityAction::none:
                 return;
@@ -1249,7 +1287,7 @@ class HttpServer::Impl
 
     void on_accept(const boost::system::error_code& error, tcp::socket socket)
     {
-        accept_capacity_.accept_completed();
+        accept_capacity_->accept_completed();
         if (drain_state_.phase() != detail::ServerDrainPhase::running)
         {
             return;
@@ -1258,7 +1296,7 @@ class HttpServer::Impl
         {
             logger_.error("http_accept_failed", {{"error_code", error.value()}});
             accept_retry_timer_.expires_after(accept_retry_delay);
-            accept_capacity_.retry_scheduled();
+            accept_capacity_->retry_scheduled();
             accept_retry_timer_.async_wait(
                 [this](const boost::system::error_code& timer_error) noexcept
                 {
@@ -1267,14 +1305,15 @@ class HttpServer::Impl
             return;
         }
 
-        auto session = std::make_shared<HttpSession>(
-            std::move(socket), config_, logger_, proxy_admission_, buffer_budget_, route_admission_,
-            [this](HttpSession* closed_session)
-            {
-                remove_session(closed_session);
-            });
+        auto session = std::make_shared<HttpSession>(std::move(socket), config_, logger_,
+                                                     proxy_admission_, buffer_budget_,
+                                                     route_admission_, metrics_, accept_capacity_,
+                                                     [this](HttpSession* closed_session)
+                                                     {
+                                                         remove_session(closed_session);
+                                                     });
         sessions_.insert(session);
-        accept_capacity_.session_started();
+        accept_capacity_->session_started();
         drain_state_.session_started();
         session->start();
         drive_accept();
@@ -1282,7 +1321,7 @@ class HttpServer::Impl
 
     void on_accept_retry_timer(const boost::system::error_code& error) noexcept
     {
-        accept_capacity_.retry_completed();
+        accept_capacity_->retry_completed();
         const bool accepting_stopped = drain_state_.phase() != detail::ServerDrainPhase::running;
         switch (detail::classify_accept_retry_completion(error, accepting_stopped))
         {
@@ -1312,8 +1351,8 @@ class HttpServer::Impl
     {
         try
         {
-            logger_.info(event, {{"active_connections", accept_capacity_.active_connections()},
-                                 {"max_connections", accept_capacity_.max_connections()}});
+            logger_.info(event, {{"active_connections", accept_capacity_->active_connections()},
+                                 {"max_connections", accept_capacity_->max_connections()}});
         }
         catch (...)
         {
@@ -1333,7 +1372,7 @@ class HttpServer::Impl
             if (iterator->get() == closed_session)
             {
                 sessions_.erase(iterator);
-                accept_capacity_.session_finished();
+                accept_capacity_->session_finished();
                 const bool drain_completed = drain_state_.session_finished();
                 if (drain_completed)
                 {
@@ -1364,7 +1403,7 @@ class HttpServer::Impl
     void stop_accepting() noexcept
     {
         health_checks_->stop();
-        accept_capacity_.stop();
+        accept_capacity_->stop();
         try
         {
             const auto cancelled_operations = accept_retry_timer_.cancel();
@@ -1550,11 +1589,12 @@ class HttpServer::Impl
     tcp::acceptor acceptor_;
     asio::steady_timer accept_retry_timer_;
     asio::steady_timer drain_timer_;
-    detail::AcceptCapacityState accept_capacity_;
+    std::shared_ptr<detail::AcceptCapacityState> accept_capacity_;
     detail::DrainState drain_state_;
     std::shared_ptr<detail::ProxyAdmissionState> proxy_admission_;
     std::shared_ptr<detail::BufferBudgetState> buffer_budget_;
     std::shared_ptr<detail::RouteProxyAdmission> route_admission_;
+    std::shared_ptr<detail::Metrics> metrics_;
     std::function<void()> on_runtime_failure_;
     std::unique_ptr<detail::HealthChecks> health_checks_;
     std::function<void()> on_drain_complete_;

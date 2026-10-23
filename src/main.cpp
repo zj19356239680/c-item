@@ -63,6 +63,8 @@ void print_help()
               << "  APIGATE_MAX_IN_FLIGHT_BYTES Buffered body reservation budget in bytes "
                  "(default: 67108864)\n"
               << "  APIGATE_SHUTDOWN_GRACE_MS Drain deadline in milliseconds (default: 5000)\n"
+              << "  APIGATE_METRICS_ENABLED true|false (default: false); expose GET /metrics to "
+                 "listener clients\n"
               << "  APIGATE_UPSTREAM_HOST Optional static HTTP upstream host\n"
               << "  APIGATE_UPSTREAM_PORT Optional static HTTP upstream port (1-65535)\n"
               << "  APIGATE_UPSTREAM_TIMEOUT_MS Per-stage timeout in milliseconds (default: 3000)\n"
@@ -142,6 +144,7 @@ int main(int argc, char* argv[])
                 {"max_concurrent_proxies", config.max_concurrent_proxies},
                 {"max_in_flight_bytes", config.max_in_flight_bytes},
                 {"shutdown_grace_ms", config.shutdown_grace_ms},
+                {"metrics_enabled", config.metrics_enabled},
                 {"proxy_enabled", config.upstream.has_value() || !config.routes.empty()}};
             if (!config.routes.empty())
             {

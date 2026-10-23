@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
+include(cmake/vcpkg-cache.cmake)
 project(ApiGate VERSION 0.3.0 LANGUAGES CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -48,6 +49,7 @@ add_library(apigate_core
     src/buffer_budget.cpp
     src/config.cpp
     src/health_check.cpp
+    src/metrics.cpp
     src/health_state.cpp
     src/http_handler.cpp
     src/http_proxy.cpp
@@ -77,6 +79,7 @@ if(BUILD_TESTING)
     add_executable(apigate_unit_tests
         tests/unit/buffer_budget_test.cpp
         tests/unit/config_test.cpp
+        tests/unit/metrics_test.cpp
         tests/unit/health_check_test.cpp
         tests/unit/http_handler_test.cpp
         tests/unit/http_proxy_test.cpp
@@ -111,6 +114,10 @@ if(BUILD_TESTING)
     add_test(NAME integration.container_smoke_safety
         COMMAND bash ${PROJECT_SOURCE_DIR}/tests/integration/container_smoke_safety.sh)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME integration.build_parallelism
+        COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/tests/integration/build_parallelism_test.py)
+    set_tests_properties(integration.build_parallelism PROPERTIES TIMEOUT 15)
     add_test(NAME integration.http_server
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/http_server_test.py
                 $<TARGET_FILE:api-gate> ${PROJECT_VERSION})
@@ -141,6 +148,10 @@ if(BUILD_TESTING)
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/https_proxy_test.py
                 $<TARGET_FILE:api-gate>)
     set_tests_properties(integration.https_proxy PROPERTIES TIMEOUT 60)
+    add_test(NAME integration.metrics
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/metrics_test.py
+                $<TARGET_FILE:api-gate>)
+    set_tests_properties(integration.metrics PROPERTIES TIMEOUT 60)
     add_test(NAME integration.health_check
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/health_check_test.py
                 $<TARGET_FILE:api-gate>)

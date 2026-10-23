@@ -48,6 +48,60 @@ expected_override_values=$(printf '%s\n%s' \
 [[ "${override_values}" == "${expected_override_values}" ]]
 echo "Cache defaults and environment overrides are correct"
 
+cat >"${temporary_directory}/check-installed-cache.cmake" <<'CHECK_INSTALLED_CACHE'
+include("${APIGATE_CACHE_MODULE}")
+if(NOT VCPKG_INSTALLED_DIR STREQUAL EXPECTED_INSTALLED_DIR)
+    message(FATAL_ERROR "Installed dependency cache did not match the expected path")
+endif()
+CHECK_INSTALLED_CACHE
+cache_module="${project_root}/cmake/vcpkg-cache.cmake"
+cache_check="${temporary_directory}/check-installed-cache.cmake"
+XDG_CACHE_HOME="${temporary_directory}/xdg-cache" cmake \
+    -DAPIGATE_DEPENDENCY_PRESET=linux-debug \
+    -DAPIGATE_CACHE_MODULE="${cache_module}" \
+    -DEXPECTED_INSTALLED_DIR="${temporary_directory}/xdg-cache/apigate/vcpkg/installed/linux-debug" \
+    -P "${cache_check}"
+env -u XDG_CACHE_HOME cmake \
+    -DAPIGATE_DEPENDENCY_PRESET=linux-analysis \
+    -DAPIGATE_CACHE_MODULE="${cache_module}" \
+    -DEXPECTED_INSTALLED_DIR="${HOME}/.cache/apigate/vcpkg/installed/linux-analysis" \
+    -P "${cache_check}"
+XDG_CACHE_HOME='' cmake \
+    -DAPIGATE_DEPENDENCY_PRESET=linux-release \
+    -DAPIGATE_CACHE_MODULE="${cache_module}" \
+    -DEXPECTED_INSTALLED_DIR="${HOME}/.cache/apigate/vcpkg/installed/linux-release" \
+    -P "${cache_check}"
+XDG_CACHE_HOME="${temporary_directory}/xdg-cache" cmake \
+    -DAPIGATE_DEPENDENCY_PRESET=linux-debug \
+    -DAPIGATE_CACHE_MODULE="${cache_module}" \
+    -DVCPKG_INSTALLED_DIR="${temporary_directory}/explicit-installed" \
+    -DEXPECTED_INSTALLED_DIR="${temporary_directory}/explicit-installed" \
+    -P "${cache_check}"
+echo "Installed dependency cache honors XDG, HOME fallback, and explicit overrides"
+
+mkdir -p "${temporary_directory}/cache-probe"
+cat >"${temporary_directory}/cache-probe/CMakeLists.txt" <<'CACHE_PROBE_PROJECT'
+cmake_minimum_required(VERSION 3.24)
+include("${APIGATE_CACHE_MODULE}")
+project(ApiGateCacheProbe NONE)
+CACHE_PROBE_PROJECT
+cat >"${temporary_directory}/cache-probe/toolchain.cmake" <<'CACHE_PROBE_TOOLCHAIN'
+if(NOT VCPKG_INSTALLED_DIR STREQUAL EXPECTED_INSTALLED_DIR)
+    message(FATAL_ERROR "Dependency cache must be initialized before the toolchain")
+endif()
+CACHE_PROBE_TOOLCHAIN
+if ! XDG_CACHE_HOME="${temporary_directory}/xdg-cache" cmake \
+    -S "${temporary_directory}/cache-probe" -B "${temporary_directory}/cache-probe-build" \
+    -DCMAKE_TOOLCHAIN_FILE="${temporary_directory}/cache-probe/toolchain.cmake" \
+    -DAPIGATE_DEPENDENCY_PRESET=linux-debug \
+    -DAPIGATE_CACHE_MODULE="${cache_module}" \
+    -DEXPECTED_INSTALLED_DIR="${temporary_directory}/xdg-cache/apigate/vcpkg/installed/linux-debug" \
+    >"${temporary_directory}/cache-probe-output" 2>&1; then
+    cat "${temporary_directory}/cache-probe-output" >&2
+    exit 1
+fi
+echo "Dependency cache is initialized before toolchain evaluation"
+
 cat >"${temporary_directory}/bin/dpkg-query" <<'MOCK_DPKG_QUERY'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${APIGATE_TEST_DPKG_CALLS}"

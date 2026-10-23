@@ -26,6 +26,8 @@ enum class GatewayFailure : std::uint8_t
 };
 
 [[nodiscard]] HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& request);
+[[nodiscard]] bool is_metrics_target(const AppConfig& config, std::string_view target) noexcept;
+[[nodiscard]] HttpResponse make_metrics_response(const HttpRequest& request, std::string body);
 [[nodiscard]] std::string_view classify_http_route(std::string_view target) noexcept;
 [[nodiscard]] bool should_proxy_http_request(const AppConfig& config,
                                              const HttpRequest& request) noexcept;

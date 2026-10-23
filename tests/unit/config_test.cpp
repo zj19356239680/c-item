@@ -3,15 +3,56 @@
 #include <gtest/gtest.h>
 #include <openssl/ssl.h>
 
+#include <cerrno>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 #include "upstream_tls.hpp"
 
 namespace
 {
+
+class TemporaryCaDirectory
+{
+   public:
+    TemporaryCaDirectory()
+    {
+        auto pattern =
+            (std::filesystem::temp_directory_path() / "apigate-config-ca-XXXXXX").string();
+        const auto* directory = mkdtemp(pattern.data());
+        if (directory == nullptr)
+        {
+            throw std::system_error(errno, std::generic_category(), "create test CA directory");
+        }
+        path_ = directory;
+    }
+
+    TemporaryCaDirectory(const TemporaryCaDirectory&) = delete;
+    TemporaryCaDirectory& operator=(const TemporaryCaDirectory&) = delete;
+
+    ~TemporaryCaDirectory()
+    {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+        if (error)
+        {
+            ADD_FAILURE() << "test CA directory cleanup failed: " << error.message();
+        }
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept
+    {
+        return path_;
+    }
+
+   private:
+    std::filesystem::path path_;
+};
 
 // These tests run serially in one process and restore the environment after each case.
 // NOLINTBEGIN(concurrency-mt-unsafe)
@@ -44,6 +85,7 @@ class ConfigTest : public testing::Test
         unsetenv("APIGATE_UPSTREAM_TIMEOUT_MS");
         unsetenv("APIGATE_UPSTREAM_CA_FILE");
         unsetenv("APIGATE_ROUTES");
+        unsetenv("APIGATE_METRICS_ENABLED");
     }
 };
 
@@ -60,9 +102,34 @@ TEST_F(ConfigTest, UsesSafeDefaults)
     EXPECT_EQ(config.max_concurrent_proxies, 32);
     EXPECT_EQ(config.max_in_flight_bytes, 67108864U);
     EXPECT_EQ(config.shutdown_grace_ms, 5000U);
+    EXPECT_FALSE(config.metrics_enabled);
     EXPECT_FALSE(config.upstream.has_value());
     EXPECT_TRUE(config.routes.empty());
     EXPECT_FALSE(config.upstream_tls_context);
+}
+
+TEST_F(ConfigTest, MetricsBooleanIsStrictAndDoesNotEchoInput)
+{
+    for (const auto* value : {"true", "false"})
+    {
+        ASSERT_EQ(setenv("APIGATE_METRICS_ENABLED", value, 1), 0);
+        EXPECT_EQ(apigate::load_config_from_environment().metrics_enabled,
+                  std::string_view{value} == "true");
+    }
+    for (const auto* value : {"", "TRUE", "False", "1", " true", "false ", "private-marker"})
+    {
+        ASSERT_EQ(setenv("APIGATE_METRICS_ENABLED", value, 1), 0);
+        try
+        {
+            static_cast<void>(apigate::load_config_from_environment());
+            FAIL() << "expected invalid boolean rejection";
+        }
+        catch (const apigate::ConfigError& error)
+        {
+            EXPECT_EQ(std::string_view{error.what()}.find("private-marker"),
+                      std::string_view::npos);
+        }
+    }
 }
 
 TEST_F(ConfigTest, ParsesStaticRoutesWithDefaultsAndBoundaries)
@@ -228,9 +295,16 @@ TEST_F(ConfigTest, RejectsInvalidSchemesDuplicatesAndPoolConflicts)
 
 TEST_F(ConfigTest, ExplicitCaMustLoadWithoutHttpsAndNeverEchoesPaths)
 {
-    for (const auto* path : {"", "/dev/null", "/tmp", "/tmp/private-missing-apigate-ca.pem"})
+    const TemporaryCaDirectory directory;
+    const auto empty_ca = directory.path() / "empty.pem";
     {
-        ASSERT_EQ(setenv("APIGATE_UPSTREAM_CA_FILE", path, 1), 0);
+        std::ofstream output{empty_ca};
+        ASSERT_TRUE(output.is_open());
+    }
+    for (const auto& path : {std::string{}, empty_ca.string(), directory.path().string(),
+                             (directory.path() / "missing.pem").string()})
+    {
+        ASSERT_EQ(setenv("APIGATE_UPSTREAM_CA_FILE", path.c_str(), 1), 0);
         try
         {
             static_cast<void>(apigate::load_config_from_environment());
@@ -238,7 +312,7 @@ TEST_F(ConfigTest, ExplicitCaMustLoadWithoutHttpsAndNeverEchoesPaths)
         }
         catch (const apigate::ConfigError& error)
         {
-            if (!std::string_view{path}.empty())
+            if (!path.empty())
             {
                 EXPECT_EQ(std::string_view{error.what()}.find(path), std::string_view::npos);
             }

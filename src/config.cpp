@@ -548,6 +548,15 @@ void validate_route_prefix(std::string_view prefix)
 AppConfig load_config_from_environment()
 {
     AppConfig config;
+    if (const auto value = read_environment("APIGATE_METRICS_ENABLED"))
+    {
+        const auto& enabled = *value;
+        if (enabled != "true" && enabled != "false")
+        {
+            throw ConfigError("APIGATE_METRICS_ENABLED must be true or false");
+        }
+        config.metrics_enabled = enabled == "true";
+    }
     if (const auto value = read_environment("APIGATE_SERVICE_NAME"))
     {
         validate_label(*value, "APIGATE_SERVICE_NAME");
