@@ -87,6 +87,8 @@ class ConfigTest : public testing::Test
         unsetenv("APIGATE_UPSTREAM_CA_FILE");
         unsetenv("APIGATE_ROUTES");
         unsetenv("APIGATE_METRICS_ENABLED");
+        unsetenv("APIGATE_TLS_CERT_FILE");
+        unsetenv("APIGATE_TLS_KEY_FILE");
     }
 };
 
@@ -108,6 +110,41 @@ TEST_F(ConfigTest, UsesSafeDefaults)
     EXPECT_FALSE(config.upstream.has_value());
     EXPECT_TRUE(config.routes.empty());
     EXPECT_FALSE(config.upstream_tls_context);
+    EXPECT_FALSE(config.downstream_tls_context);
+}
+
+TEST_F(ConfigTest, DownstreamTlsRejectsMissingEmptyAndInvalidFilesWithoutEchoingPaths)
+{
+    const TemporaryCaDirectory directory;
+    const auto invalid = directory.path() / "private-invalid.pem";
+    {
+        std::ofstream output{invalid};
+        ASSERT_TRUE(output.is_open());
+        output << "not a PEM certificate or key";
+    }
+    for (const auto* variable : {"APIGATE_TLS_CERT_FILE", "APIGATE_TLS_KEY_FILE"})
+    {
+        ASSERT_EQ(setenv(variable, invalid.c_str(), 1), 0);
+        EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()),
+                     apigate::ConfigError);
+        ASSERT_EQ(setenv(variable, "", 1), 0);
+        EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()),
+                     apigate::ConfigError);
+        ASSERT_EQ(unsetenv(variable), 0);
+    }
+    ASSERT_EQ(setenv("APIGATE_TLS_CERT_FILE", invalid.c_str(), 1), 0);
+    ASSERT_EQ(setenv("APIGATE_TLS_KEY_FILE", invalid.c_str(), 1), 0);
+    try
+    {
+        static_cast<void>(apigate::load_config_from_environment());
+        FAIL() << "expected invalid TLS material rejection";
+    }
+    catch (const apigate::ConfigError& error)
+    {
+        EXPECT_EQ(std::string_view{error.what()}.find(directory.path().string()),
+                  std::string_view::npos);
+        EXPECT_EQ(std::string_view{error.what()}.find("not a PEM"), std::string_view::npos);
+    }
 }
 
 TEST_F(ConfigTest, UpstreamKeepAliveIsStrictAndDoesNotEchoInput)

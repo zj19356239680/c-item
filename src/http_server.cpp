@@ -2,6 +2,7 @@
 
 #include <boost/asio/error.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ssl/error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -26,6 +27,7 @@
 #include "apigate/http_handler.hpp"
 #include "apigate/logging.hpp"
 #include "buffer_budget.hpp"
+#include "downstream_transport.hpp"
 #include "http_proxy.hpp"
 #include "http_server_internal.hpp"
 #include "metrics.hpp"
@@ -94,10 +96,12 @@ SessionDrainDisposition classify_session_drain(SessionPhase phase) noexcept
 {
     switch (phase)
     {
+        case SessionPhase::handshaking:
         case SessionPhase::reading:
             return SessionDrainDisposition::close_immediately;
         case SessionPhase::proxying:
         case SessionPhase::writing:
+        case SessionPhase::closing:
             return SessionDrainDisposition::wait_for_current;
         case SessionPhase::finished:
             return SessionDrainDisposition::ignored;
@@ -373,7 +377,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
                 std::shared_ptr<detail::Metrics> metrics,
                 std::shared_ptr<detail::AcceptCapacityState> connections, CloseCallback on_close,
                 std::shared_ptr<detail::UpstreamPool> pool = nullptr)
-        : stream_(std::move(socket)),
+        : stream_(std::move(socket), config.downstream_tls_context),
           config_(config),
           logger_(logger),
           proxy_admission_(std::move(proxy_admission)),
@@ -407,7 +411,34 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
 
     void start()
     {
-        read_request();
+        if (!stream_.is_tls())
+        {
+            read_request();
+            return;
+        }
+        phase_ = detail::SessionPhase::handshaking;
+        // One absolute deadline across every underlying TLS read/write, never refreshed.
+        stream_.expires_after(std::chrono::seconds{5});
+        stream_.async_handshake(
+            [self = shared_from_this()](const boost::system::error_code& error) noexcept
+            {
+                self->run_handler(
+                    [&]
+                    {
+                        if (self->finished_)
+                        {
+                            return;
+                        }
+                        if (error)
+                        {
+                            self->log_tls_failure("http_tls_handshake_failed", error);
+                            self->close_socket();
+                            return;
+                        }
+                        self->tls_established_ = true;
+                        self->read_request();
+                    });
+            });
     }
 
 #ifdef APIGATE_HTTP_SESSION_TESTING
@@ -482,22 +513,22 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
 
         observation_ = {};
         phase_ = detail::SessionPhase::reading;
-        parser_.emplace();
-        parser_->header_limit(max_header_bytes);
+        auto& parser = detail::DownstreamTransport::reset_parser(parser_);
+        parser.header_limit(max_header_bytes);
         // Inspect Expect before applying the payload limit so a client waiting for
         // 100-continue receives the promised 417 without sending its body.
-        parser_->body_limit(std::numeric_limits<std::uint64_t>::max());
+        parser.body_limit(std::numeric_limits<std::uint64_t>::max());
         stream_.expires_after(request_timeout);
-        http::async_read_header(stream_, buffer_, *parser_,
-                                [self = shared_from_this()](const boost::system::error_code& error,
-                                                            std::size_t) noexcept
-                                {
-                                    self->run_handler(
-                                        [self, &error]
-                                        {
-                                            self->on_read_header(error);
-                                        });
-                                });
+        stream_.async_read_header(
+            buffer_, parser,
+            [self = shared_from_this()](const boost::system::error_code& error) noexcept
+            {
+                self->run_handler(
+                    [self, &error]
+                    {
+                        self->on_read_header(error);
+                    });
+            });
     }
 
     void on_read_header(const boost::system::error_code& error)
@@ -566,16 +597,16 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         }
         request_body_permit_ = std::make_shared<detail::BufferBudgetPermit>(std::move(*permit));
 
-        http::async_read(stream_, buffer_, *parser_,
-                         [self = shared_from_this()](const boost::system::error_code& body_error,
-                                                     std::size_t) noexcept
-                         {
-                             self->run_handler(
-                                 [self, &body_error]
-                                 {
-                                     self->on_read_body(body_error);
-                                 });
-                         });
+        stream_.async_read(
+            buffer_, *parser_,
+            [self = shared_from_this()](const boost::system::error_code& body_error) noexcept
+            {
+                self->run_handler(
+                    [self, &body_error]
+                    {
+                        self->on_read_body(body_error);
+                    });
+            });
     }
 
     void on_read_body(const boost::system::error_code& error)
@@ -642,8 +673,20 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
 
     void handle_read_error(const boost::system::error_code& error)
     {
-        if (error == http::error::end_of_stream || error == asio::error::operation_aborted)
+        if (error == http::error::end_of_stream)
         {
+            graceful_close();
+            return;
+        }
+        if (error == asio::error::operation_aborted)
+        {
+            close_socket();
+            return;
+        }
+        if (error == asio::ssl::error::stream_truncated)
+        {
+            // Missing close_notify is not an HTTP message boundary or a completed request.
+            log_tls_failure("http_tls_request_truncated", error);
             close_socket();
             return;
         }
@@ -927,16 +970,16 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         response_.emplace(std::move(response));
         response_body_permit_ = std::move(body_permit);
         stream_.expires_after(request_timeout);
-        http::async_write(stream_, *response_,
-                          [self = shared_from_this(), close_after_write](
-                              const boost::system::error_code& error, std::size_t) noexcept
-                          {
-                              self->run_handler(
-                                  [self, close_after_write, &error]
-                                  {
-                                      self->on_write(error, close_after_write);
-                                  });
-                          });
+        stream_.async_write(*response_,
+                            [self = shared_from_this(),
+                             close_after_write](const boost::system::error_code& error) noexcept
+                            {
+                                self->run_handler(
+                                    [self, close_after_write, &error]
+                                    {
+                                        self->on_write(error, close_after_write);
+                                    });
+                            });
     }
 
     template <typename HandlerAction>
@@ -969,7 +1012,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
             case detail::HttpWriteDisposition::success:
                 if (close_after_write || draining_)
                 {
-                    close_socket();
+                    graceful_close();
                 }
                 else
                 {
@@ -991,6 +1034,56 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
                 }
                 close_socket();
                 return;
+        }
+    }
+
+    void log_tls_failure(const char* event, const boost::system::error_code& error) noexcept
+    {
+        try
+        {
+            logger_.warn(event,
+                         {{"reason", error == beast::error::timeout ? "timeout" : "transport"}});
+        }
+        catch (...)
+        {
+            write_fallback_diagnostic("http_tls_log_failed", 0);
+        }
+    }
+
+    void graceful_close() noexcept
+    {
+        if (finished_ || phase_ == detail::SessionPhase::closing)
+        {
+            return;
+        }
+        if (!stream_.is_tls() || !tls_established_)
+        {
+            close_socket();
+            return;
+        }
+        phase_ = detail::SessionPhase::closing;
+        try
+        {
+            // Server drain deadline/second signal can stop() this transport sooner.
+            stream_.expires_after(std::chrono::seconds{2});
+            stream_.async_shutdown(
+                [self = shared_from_this()](const boost::system::error_code& error) noexcept
+                {
+                    if (self->finished_)
+                    {
+                        return;
+                    }
+                    if (error)
+                    {
+                        self->log_tls_failure("http_tls_shutdown_failed", error);
+                    }
+                    self->close_socket();
+                });
+        }
+        catch (...)
+        {
+            write_fallback_diagnostic("http_tls_shutdown_start_failed", 0);
+            close_socket();
         }
     }
 
@@ -1027,7 +1120,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         on_close_(this);
     }
 
-    beast::tcp_stream stream_;
+    detail::DownstreamTransport stream_;
     beast::flat_buffer buffer_{max_header_bytes + static_cast<std::size_t>(max_body_bytes)};
     const AppConfig& config_;
     StructuredLogger& logger_;
@@ -1048,6 +1141,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
     std::string remote_address_;
     std::size_t requests_served_{0};
     detail::SessionPhase phase_{detail::SessionPhase::reading};
+    bool tls_established_{false};
     bool draining_{false};
     bool stopping_{false};
     bool finished_{false};

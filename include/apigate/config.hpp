@@ -29,6 +29,7 @@ enum class UpstreamScheme : std::uint8_t
 };
 
 class UpstreamTlsContext;
+class DownstreamTlsContext;
 
 struct UpstreamConfig
 {
@@ -78,6 +79,7 @@ struct AppConfig
     std::optional<UpstreamConfig> upstream;
     std::vector<RouteConfig> routes;
     std::shared_ptr<UpstreamTlsContext> upstream_tls_context;
+    std::shared_ptr<DownstreamTlsContext> downstream_tls_context;
 };
 
 class ConfigError : public std::runtime_error

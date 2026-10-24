@@ -48,6 +48,8 @@ add_library(apigate_core
     src/application.cpp
     src/buffer_budget.cpp
     src/config.cpp
+    src/downstream_tls.cpp
+    src/downstream_transport.cpp
     src/health_check.cpp
     src/metrics.cpp
     src/health_state.cpp
@@ -120,6 +122,10 @@ if(BUILD_TESTING)
         COMMAND ${Python3_EXECUTABLE}
                 ${PROJECT_SOURCE_DIR}/tests/integration/build_parallelism_test.py)
     set_tests_properties(integration.build_parallelism PROPERTIES TIMEOUT 15)
+    add_test(NAME integration.downstream_tls
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/downstream_tls_test.py
+                $<TARGET_FILE:api-gate>)
+    set_tests_properties(integration.downstream_tls PROPERTIES TIMEOUT 60)
     add_test(NAME integration.http_server
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/http_server_test.py
                 $<TARGET_FILE:api-gate> ${PROJECT_VERSION})

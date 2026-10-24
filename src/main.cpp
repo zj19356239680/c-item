@@ -65,6 +65,10 @@ void print_help()
               << "  APIGATE_SHUTDOWN_GRACE_MS Drain deadline in milliseconds (default: 5000)\n"
               << "  APIGATE_METRICS_ENABLED true|false (default: false); expose GET /metrics to "
                  "listener clients\n"
+              << "  APIGATE_TLS_CERT_FILE PEM server certificate chain; requires TLS key (default: "
+                 "HTTP)\n"
+              << "  APIGATE_TLS_KEY_FILE  Matching unencrypted PEM private key; enables "
+                 "single-listener HTTPS\n"
               << "  APIGATE_UPSTREAM_KEEP_ALIVE true|false (default: false); reuse HTTP/HTTPS "
                  "connections\n"
               << "  APIGATE_UPSTREAM_HOST Optional static HTTP upstream host\n"
@@ -148,6 +152,7 @@ int main(int argc, char* argv[])
                 {"shutdown_grace_ms", config.shutdown_grace_ms},
                 {"metrics_enabled", config.metrics_enabled},
                 {"upstream_keep_alive", config.upstream_keep_alive},
+                {"tls_enabled", config.downstream_tls_context != nullptr},
                 {"proxy_enabled", config.upstream.has_value() || !config.routes.empty()}};
             if (!config.routes.empty())
             {

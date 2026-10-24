@@ -235,6 +235,10 @@ TEST(DrainTimerDispositionTest, DistinguishesTimeoutCancellationAndFatalErrors)
 
 TEST(SessionDrainDispositionTest, ClosesReadsAndWaitsForDispatchedWork)
 {
+    EXPECT_EQ(classify_session_drain(SessionPhase::handshaking),
+              SessionDrainDisposition::close_immediately);
+    EXPECT_EQ(classify_session_drain(SessionPhase::closing),
+              SessionDrainDisposition::wait_for_current);
     EXPECT_EQ(classify_session_drain(SessionPhase::reading),
               SessionDrainDisposition::close_immediately);
     EXPECT_EQ(classify_session_drain(SessionPhase::proxying),

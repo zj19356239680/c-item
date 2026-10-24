@@ -3,7 +3,7 @@
 ApiGate 是一个用于学习和逐步开发 API 网关的 C++20 项目。当前版本提供异步
 HTTP/1.1 健康检查、配置校验、JSON 日志，以及可选的路径路由与多个静态 HTTP/HTTPS 上游。
 代理支持 GET 及有界正文的 POST、PUT、PATCH、同一路由多实例轮询，以及可选主动健康检查与故障摘除。支持默认关闭的 HTTP/HTTPS 上游连接池。它没有流式上传、重试、
-缓存、每客户端或分布式限流、认证、下游 TLS 或 HTTP/2；可选按路由限流不构成生产容量保证。
+缓存、每客户端或分布式限流、认证或 HTTP/2；支持可选下游 TLS。按路由限流不构成生产容量保证。
 不要把它当作生产网关。本项目在 Linux 环境下开发，
 仅支持 Linux 构建与运行。
 
@@ -215,6 +215,8 @@ bash scripts/check.sh
 | `APIGATE_LOG_LEVEL` | `info` | `trace`、`debug`、`info`、`warn`、`error`、`critical` |
 | `APIGATE_LISTEN_ADDRESS` | `127.0.0.1` | IPv4/IPv6 字面地址，不解析主机名 |
 | `APIGATE_LISTEN_PORT` | `8080` | 0–65535；0 由内核分配临时端口 |
+| `APIGATE_TLS_CERT_FILE` | 未设置 | PEM 服务端证书链；与 APIGATE_TLS_KEY_FILE 同时设置，启用单监听器 HTTPS |
+| `APIGATE_TLS_KEY_FILE` | 未设置 | 匹配的未加密 PEM 私钥，不交互询问口令 |
 | `APIGATE_METRICS_ENABLED` | `false` | 严格 true/false；在现有监听器暴露无认证的 GET /metrics |
 | `APIGATE_MAX_CONNECTIONS` | `256` | 1–65535；活动下游连接数上限 |
 | `APIGATE_MAX_CONCURRENT_PROXIES` | `32` | 1–65535；并发上游代理交换数上限 |
@@ -300,7 +302,7 @@ HTTP 响应收到后直接回收底层连接，不等待 TLS close_notify；未�
 
 OpenSSL 由现有 vcpkg/CMake 管理，当前 x64-linux 静态链接 SSL/crypto；运行环境仍需
 系统 CA（Ubuntu 的 ca-certificates）或可读的自定义 PEM。TLS 进程测试还需本机 openssl
-命令生成临时测试 CA/密钥，不使用个人证书。下游仍为 HTTP；不支持 mTLS、HTTP/2、
+命令生成临时测试 CA/密钥，不使用个人证书。下游默认 HTTP，可独立启用单监听器 HTTPS；不支持 mTLS、HTTP/2、
 自动重试或全面生产容量保证；主动摘除需显式配置 health_check。
 
 ### 轮询与路由限流
@@ -347,6 +349,43 @@ null、未知或重复字段。前者是每秒补充的令牌数，后者是最�
 它保护上游请求速率，不是上传带宽限制、连接容量限制、公平性或生产容量保证。
 正常 429 沿用低敏感度 `http_request_completed` 日志，不记录路径、query 或正文，
 不误报上游错误；实际容量和性能仍需在目标负载下测量。
+
+### 可选下游 TLS（HTTPS）
+
+默认监听明文 HTTP。只有同时设置两个非空配置后，**同一个监听器改为 HTTPS**：
+
+```bash
+APIGATE_TLS_CERT_FILE=/path/to/server-chain.pem \
+APIGATE_TLS_KEY_FILE=/path/to/server-key.pem \
+bash scripts/run.sh
+curl --cacert /path/to/trusted-ca.pem https://localhost:8080/healthz
+```
+
+服务端证书必须覆盖客户端访问时使用的主机名/IP。客户端应配置可信 CA 并验证证书链和
+主机身份；示例没有关闭校验。提供 PEM 证书链和匹配的未加密 PEM 私钥，在监听前加载并
+检查匹配；任一配置缺失、空值、文件不可读/无效、私钥不匹配或加密均安全失败，不提示输入
+口令，也不回显路径、证书、私钥或 OpenSSL 错误栈。程序不会生成用户证书或修改文件权限。
+`--check-config` 同样加载校验，只报告 `tls_enabled` 等安全状态，不创建监听器；
+`--version` 保持不读取配置。
+
+最低 TLS 1.2，仅 HTTP/1.1；ALPN 只协商 http/1.1，未提供 ALPN 仍可使用 HTTP/1.1，
+提供 ALPN 但无兼容协议则拒绝握手。不开放第二个 HTTP 端口，不自动跳转或识别混合协议。
+上游独立选择 HTTP/HTTPS，服务端与上游客户端 TLS context、证书和验证策略分离。
+
+accept 后立即占用连接名额，再异步握手。握手共享一次固定 **5 秒总期限**，零碎数据不刷新；
+完成后才开始原 HTTP 读取期限。握手失败、超时、断连和取消不产生 HTTP 响应、不计 HTTP
+累计指标，不取得代理 permit 或正文预算，只作低敏感度结构化诊断并释放连接名额。
+HTTP keep-alive、请求/响应边界、路由、原始 query、限流、轮询、健康状态和指标语义不变。
+
+正常 HTTP 连接关闭时尝试 TLS close_notify，关闭阶段最多 **2 秒**；对端不响应也会关闭。
+排空立即取消未完成握手、空闲或部分请求，已分派请求仍按原期限完成并不再读取下一请求。
+已有排空总 deadline 不会因 TLS shutdown 延长，deadline 和第二信号能强制终止握手及关闭。
+协议错误、超时、RST 和强停可直接关闭底层 socket；未完成请求缺失 close_notify 仍失败，
+不全局忽略 stream_truncated。TLS 有额外缓冲和握手开销，正文预算不是 RSS 上限。
+
+TLS 是传输加密，**不是认证**；未要求客户端证书。启用后 `/metrics` 仍无访问认证，任何
+能访问该监听器的客户端仍可读取，不代表仅可信客户端可访问。首版仅单份证书，不提供
+mTLS、SNI 多证书、0-RTT、HTTP/2、ACME、签发或证书热更新，也不构成完整生产就绪保证。
 
 ### 可选上游连接池
 
@@ -464,11 +503,11 @@ socket、TLS、解析和 timer 开销。开始排空立即取消所有探测，�
 新旧上游变量均未设置时代理关闭，原有未知 GET 的 404 及其他方法的 405 行为保持不变。
 三项容量配置始终校验；代理关闭时代理并发上限不被使用。配置检查结果会报告
 `max_connections`、`max_concurrent_proxies`、`max_in_flight_bytes`、
-`shutdown_grace_ms`、`proxy_enabled`；旧单上游模式包含 `upstream_timeout_ms`，
+`shutdown_grace_ms`、`proxy_enabled`、`tls_enabled`；旧单上游模式包含 `upstream_timeout_ms`，
 路由模式只包含安全的 `route_count`，不会输出路由表、host 或 prefix，也不虚构统一超时。
 
 当前没有每客户端/IP、全局或分布式限流；也不支持其他代理方法、
-流式上传、动态路由、下游 TLS、mTLS、HTTP/2、WebSocket 或预排空管理阶段。实际可承载数量
+流式上传、动态路由、mTLS、HTTP/2、WebSocket 或预排空管理阶段。实际可承载数量
 仍受文件描述符、内存、CPU、请求/响应缓冲和操作系统 backlog 等因素约束。现有测试
 覆盖不构成生产容量或协议兼容性承诺。
 

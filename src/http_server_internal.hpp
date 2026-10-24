@@ -60,9 +60,11 @@ enum class DrainTimerDisposition : std::uint8_t
 
 enum class SessionPhase : std::uint8_t
 {
+    handshaking,
     reading,
     proxying,
     writing,
+    closing,
     finished,
 };
 

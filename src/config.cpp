@@ -14,6 +14,7 @@
 #include <system_error>
 #include <utility>
 
+#include "downstream_tls.hpp"
 #include "upstream_tls.hpp"
 
 namespace apigate
@@ -548,6 +549,8 @@ void validate_route_prefix(std::string_view prefix)
 AppConfig load_config_from_environment()
 {
     AppConfig config;
+    config.downstream_tls_context = make_downstream_tls_context(
+        read_environment("APIGATE_TLS_CERT_FILE"), read_environment("APIGATE_TLS_KEY_FILE"));
     if (const auto value = read_environment("APIGATE_UPSTREAM_KEEP_ALIVE"))
     {
         const auto& enabled = *value;
