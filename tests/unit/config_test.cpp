@@ -13,6 +13,7 @@
 #include <string_view>
 #include <system_error>
 
+#include "apigate/http_handler.hpp"
 #include "upstream_tls.hpp"
 
 namespace
@@ -1149,6 +1150,45 @@ TEST_F(ConfigTest, RejectsInvalidListenPort)
     ASSERT_EQ(setenv("APIGATE_LISTEN_PORT", "-1", 1), 0);
     EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()), apigate::ConfigError);
 }
+TEST_F(ConfigTest, StreamResponseIsStrictOptionalAndSupportsBothBackendForms)
+{
+    for (const auto* input :
+         {R"([{"prefix":"/","host":"h","port":80}])",
+          R"([{"prefix":"/","upstreams":[{"host":"h","port":80}],"stream_response":false}])"})
+    {
+        ASSERT_EQ(setenv("APIGATE_ROUTES", input, 1), 0);
+        EXPECT_FALSE(apigate::load_config_from_environment().routes.front().stream_response);
+    }
+    for (const auto* input :
+         {R"([{"prefix":"/","host":"h","port":80,"stream_response":true}])",
+          R"([{"prefix":"/","upstreams":[{"host":"h","port":80}],"stream_response":true}])"})
+    {
+        ASSERT_EQ(setenv("APIGATE_ROUTES", input, 1), 0);
+        const auto config = apigate::load_config_from_environment();
+        EXPECT_TRUE(config.routes.front().stream_response);
+        const apigate::HttpRequest request{boost::beast::http::verb::get, "/", 11};
+        const auto selected = apigate::select_http_route(config, request);
+        if (selected)
+        {
+            const auto& selected_route = *selected;
+            EXPECT_TRUE(selected_route.stream_response);
+        }
+        else
+        {
+            ADD_FAILURE() << "configured streaming route was not selected";
+        }
+    }
+    for (const auto* value :
+         {"null", "0", "1", "\"true\"", "[]", "{}", "true,\"stream_response\":false"})
+    {
+        const auto input =
+            std::string{R"([{"prefix":"/","host":"h","port":80,"stream_response":)"} + value + "}]";
+        ASSERT_EQ(setenv("APIGATE_ROUTES", input.c_str(), 1), 0);
+        EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()),
+                     apigate::ConfigError);
+    }
+}
+
 // NOLINTEND(concurrency-mt-unsafe)
 
 }  // namespace

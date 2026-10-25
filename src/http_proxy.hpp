@@ -16,6 +16,7 @@
 #include "apigate/config.hpp"
 #include "apigate/http_handler.hpp"
 #include "buffer_budget.hpp"
+#include "stream_response.hpp"
 
 namespace apigate
 {
@@ -113,6 +114,16 @@ void run_proxy_completion_action(ProxyCompletionState& state, CompletionAction&&
 
 }  // namespace detail
 
+struct StreamCallbacks
+{
+    std::function<void(HttpResponse, detail::StreamResume)> header;
+    std::function<void(std::shared_ptr<detail::StreamBlock>, std::size_t, bool,
+                       detail::StreamResume)>
+        body;
+    // null failure means success, unless downstream_failed is true.
+    std::function<void(std::optional<ProxyFailure>, bool downstream_failed)> finish;
+};
+
 class HttpProxyExchange : public std::enable_shared_from_this<HttpProxyExchange>
 {
    public:
@@ -125,7 +136,8 @@ class HttpProxyExchange : public std::enable_shared_from_this<HttpProxyExchange>
                       std::shared_ptr<detail::BufferBudgetState> buffer_budget,
                       std::shared_ptr<detail::BufferBudgetPermit> request_body_permit,
                       CompletionCallback on_complete, AbortCallback on_abort,
-                      std::shared_ptr<detail::UpstreamPool> pool = nullptr);
+                      std::shared_ptr<detail::UpstreamPool> pool = nullptr,
+                      StreamCallbacks streaming = {});
     ~HttpProxyExchange();
 
     HttpProxyExchange(const HttpProxyExchange&) = delete;

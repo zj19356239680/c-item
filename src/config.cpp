@@ -414,7 +414,8 @@ void validate_route_prefix(std::string_view prefix)
             if (item.key() != "prefix" && item.key() != "host" && item.key() != "port" &&
                 item.key() != "timeout_ms" && item.key() != "strip_prefix" &&
                 item.key() != "rate_limit" && item.key() != "upstreams" && item.key() != "scheme" &&
-                item.key() != "health_check" && item.key() != "auth")
+                item.key() != "health_check" && item.key() != "auth" &&
+                item.key() != "stream_response")
             {
                 throw ConfigError("APIGATE_ROUTES entry contains an unknown field");
             }
@@ -574,8 +575,18 @@ void validate_route_prefix(std::string_view prefix)
                 throw ConfigError("authentication key configuration failed");
             }
         }
+        bool stream_response = false;
+        if (entry.contains("stream_response"))
+        {
+            const auto& streaming_value = entry.at("stream_response");
+            if (!streaming_value.is_boolean())
+            {
+                throw ConfigError("APIGATE_ROUTES stream_response must be a boolean");
+            }
+            stream_response = streaming_value.get<bool>();
+        }
         routes.push_back({std::move(prefix), std::move(upstreams), strip_prefix, rate_limit,
-                          std::move(health_check), auth});
+                          std::move(health_check), auth, stream_response});
     }
     return routes;
 }

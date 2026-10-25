@@ -39,6 +39,7 @@ struct SelectedUpstream
     bool strip_prefix{false};
     std::optional<std::size_t> route_index{std::nullopt};
     bool strip_authorization{false};
+    bool stream_response{false};
 };
 
 // Matches a route without selecting a backend or advancing any runtime state.
@@ -50,6 +51,7 @@ struct SelectedRoute
     bool strip_prefix{false};
     std::optional<std::size_t> route_index{std::nullopt};
     const ApiKeyAuthConfig* auth{nullptr};
+    bool stream_response{false};
 };
 
 [[nodiscard]] std::optional<SelectedRoute> select_http_route(const AppConfig& config,

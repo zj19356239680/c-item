@@ -143,6 +143,10 @@ if(BUILD_TESTING)
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/body_timeout_test.py
                 $<TARGET_FILE:api-gate>)
     set_tests_properties(integration.body_timeout PROPERTIES TIMEOUT 45)
+    add_test(NAME integration.stream_response
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/stream_response_test.py
+                $<TARGET_FILE:api-gate>)
+    set_tests_properties(integration.stream_response PROPERTIES TIMEOUT 90)
     add_test(NAME integration.upstream_pool
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/upstream_pool_test.py
                 $<TARGET_FILE:api-gate>)

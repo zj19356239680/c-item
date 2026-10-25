@@ -68,6 +68,7 @@ struct RouteConfig
     std::optional<RateLimitConfig> rate_limit{std::nullopt};
     std::optional<HealthCheckConfig> health_check{std::nullopt};
     std::optional<ApiKeyAuthConfig> auth{std::nullopt};
+    bool stream_response{false};
 };
 
 struct AppConfig

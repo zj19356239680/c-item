@@ -93,7 +93,15 @@ class SessionWriteRegressionTest : public testing::Test
         const auto logs = testing::internal::GetCapturedStdout();
         EXPECT_TRUE(testing::internal::GetCapturedStderr().empty());
         EXPECT_EQ(logs.find("http_response_write_failed"), std::string::npos);
-        EXPECT_EQ(logs.find("http_upstream_request_failed"), std::string::npos);
+        if (expect_timeout_)
+        {
+            EXPECT_NE(logs.find("http_upstream_request_failed"), std::string::npos);
+            EXPECT_NE(logs.find("\"stage\":\"timeout\""), std::string::npos);
+        }
+        else
+        {
+            EXPECT_EQ(logs.find("http_upstream_request_failed"), std::string::npos);
+        }
         EXPECT_EQ(logs.find("critical"), std::string::npos);
         EXPECT_EQ(logs.find("http_proxy_rejected_capacity"), std::string::npos);
         EXPECT_EQ(logs.find("write-body-marker"), std::string::npos);
@@ -255,6 +263,17 @@ class SessionWriteRegressionTest : public testing::Test
                          });
     }
 
+    void enable_streaming(std::uint32_t timeout_ms = 5000)
+    {
+        apigate::RouteConfig route;
+        route.prefix = "/";
+        route.upstreams.push_back(
+            {"127.0.0.1", upstream_acceptor_.local_endpoint().port(), timeout_ms});
+        route.stream_response = true;
+        config_.routes.push_back(std::move(route));
+        config_.upstream.reset();
+    }
+
     void assert_blocked_write()
     {
         // This observes the actual session after proxy completion, not merely
@@ -337,7 +356,112 @@ class SessionWriteRegressionTest : public testing::Test
     const std::string expected_body_{std::string{"write-body-marker"} +
                                      std::string(response_bytes - 17, 'w')};
     std::size_t upstream_writes_completed_{0};
+    bool expect_timeout_{false};
 };
+
+TEST_F(SessionWriteRegressionTest, StreamingBackpressureHoldsOneBlockAndPermitUntilCompletion)
+{
+    enable_streaming();
+    auto& holder = start_client(true);
+    ASSERT_TRUE(run_until(
+        [&holder]
+        {
+            return holder.header_done;
+        }));
+    ASSERT_FALSE(holder.error);
+    // Poll all runnable work while the real client deliberately stops consuming.
+    // Small socket send/receive buffers force a non-completed async body write.
+    ASSERT_TRUE(run_until(
+        [this]
+        {
+            context_.poll();
+            return probes_.front().snapshot().pending;
+        }));
+    context_.poll();
+    const auto snapshot = probes_.front().snapshot();
+    ASSERT_TRUE(snapshot.pending);
+    EXPECT_GT(snapshot.body_bytes, 0U);
+    EXPECT_LE(snapshot.body_bytes, 16384U);
+    EXPECT_EQ(budget_->current_bytes(), 16384U);
+    EXPECT_EQ(admission_->active_proxies(), 1U);
+    read_body(0);
+    ASSERT_TRUE(run_until(
+        [&holder]
+        {
+            return holder.done;
+        }));
+    ASSERT_FALSE(holder.error);
+    EXPECT_EQ(holder.parser.get().body(), expected_body_);
+    ASSERT_TRUE(run_until(
+        [this]
+        {
+            return budget_->current_bytes() == 0;
+        }));
+    EXPECT_EQ(admission_->active_proxies(), 0U);
+}
+
+TEST_F(SessionWriteRegressionTest, CancelledStreamingWriteRetainsBlockUntilCallbackAndRecovers)
+{
+    enable_streaming();
+    auto& holder = start_client(true);
+    ASSERT_TRUE(run_until(
+        [&holder]
+        {
+            return holder.header_done;
+        }));
+    ASSERT_TRUE(run_until(
+        [this]
+        {
+            context_.poll();
+            return probes_.front().snapshot().pending;
+        }));
+    context_.poll();
+    ASSERT_TRUE(probes_.front().snapshot().pending);
+    probes_.front().stop();
+    probes_.front().stop();
+    EXPECT_EQ(budget_->current_bytes(), 16384U);
+    ASSERT_TRUE(run_until(
+        [this]
+        {
+            return budget_->current_bytes() == 0;
+        }));
+    EXPECT_EQ(admission_->active_proxies(), 0U);
+    EXPECT_EQ(close_counts_.front(), 1U);
+    assert_full_recovery();
+}
+
+TEST_F(SessionWriteRegressionTest, StreamingBackpressureCannotExtendUpstreamReadDeadline)
+{
+    enable_streaming(150);
+    expect_timeout_ = true;
+    auto& holder = start_client(true);
+    ASSERT_TRUE(run_until(
+        [&holder]
+        {
+            return holder.header_done;
+        }));
+    ASSERT_FALSE(holder.error);
+    ASSERT_TRUE(run_until(
+        [this]
+        {
+            context_.poll();
+            return probes_.front().snapshot().pending;
+        }));
+    context_.poll();
+    ASSERT_TRUE(probes_.front().snapshot().pending);
+    ASSERT_TRUE(run_until(
+        [this]
+        {
+            return close_counts_.front() == 1;
+        }));
+    ASSERT_TRUE(run_until(
+        [this]
+        {
+            return budget_->current_bytes() == 0;
+        }));
+    EXPECT_EQ(admission_->active_proxies(), 0U);
+    EXPECT_EQ(close_counts_.front(), 1U);
+}
 
 TEST_F(SessionWriteRegressionTest, HoldsFullResponseBudgetUntilDownstreamWriteCompletes)
 {

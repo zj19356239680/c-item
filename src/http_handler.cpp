@@ -133,8 +133,8 @@ std::optional<SelectedRoute> select_http_route(const AppConfig& config,
             {
                 auth = &*route.auth;
             }
-            selected.emplace(
-                SelectedRoute{route.upstreams, route.prefix, route.strip_prefix, index, auth});
+            selected.emplace(SelectedRoute{route.upstreams, route.prefix, route.strip_prefix, index,
+                                           auth, route.stream_response});
             longest = prefix.size();
         }
     }

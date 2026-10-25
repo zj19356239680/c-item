@@ -59,6 +59,7 @@ class RequestObservation
                               Clock::time_point now) noexcept;
     void reject(Metrics* metrics, RejectionReason reason) noexcept;
     void fail(Metrics* metrics, ProxyFailureStage stage) noexcept;
+    void fail_stream(Metrics* metrics, ProxyFailureStage stage) noexcept;
     [[nodiscard]] bool completed() const noexcept;
 
    private:

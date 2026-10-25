@@ -12,6 +12,7 @@
 
 #include "apigate/http_handler.hpp"
 #include "downstream_tls.hpp"
+#include "stream_response.hpp"
 
 namespace apigate::detail
 {
@@ -37,6 +38,9 @@ class DownstreamTransport
                            Completion completion);
     void async_read(boost::beast::flat_buffer& buffer, Parser& parser, Completion completion);
     void async_write(HttpResponse& response, Completion completion);
+    void async_stream_header(std::shared_ptr<StreamWriter> writer, Completion completion);
+    void async_stream_body(std::shared_ptr<StreamWriter> writer, std::shared_ptr<StreamBlock> block,
+                           std::size_t bytes, bool final, Completion completion);
     void async_shutdown(Completion completion);
 
    private:

@@ -69,6 +69,27 @@ TEST(MetricsTest, ObservesOnlyFinalResponsesOnceAndTimesOnlyDispatchedRequests)
     EXPECT_NE(text.find("apigate_request_processing_seconds_count 1\n"), std::string::npos);
 }
 
+TEST(MetricsTest, LateStreamingFailureDoesNotDuplicateStatusOrDuration)
+{
+    Metrics metrics;
+    RequestObservation request;
+    const RequestObservation::Clock::time_point now{};
+    request.begin(now);
+    ASSERT_TRUE(request.finish(&metrics, 200, now + 250ms));
+    request.fail(&metrics, apigate::ProxyFailureStage::timeout);
+    EXPECT_NE(render(metrics).find("stage=\"timeout\"} 0\n"), std::string::npos);
+    request.fail_stream(&metrics, apigate::ProxyFailureStage::timeout);
+    request.fail_stream(&metrics, apigate::ProxyFailureStage::read);
+    EXPECT_FALSE(request.finish(&metrics, 504, now + 1s));
+    const auto text = render(metrics);
+    EXPECT_NE(text.find("status=\"200\"} 1\n"), std::string::npos);
+    EXPECT_NE(text.find("status=\"504\"} 0\n"), std::string::npos);
+    EXPECT_NE(text.find("stage=\"timeout\"} 1\n"), std::string::npos);
+    EXPECT_NE(text.find("stage=\"read\"} 0\n"), std::string::npos);
+    EXPECT_NE(text.find("apigate_request_processing_seconds_sum 0.25\n"), std::string::npos);
+    EXPECT_NE(text.find("apigate_request_processing_seconds_count 1\n"), std::string::npos);
+}
+
 TEST(MetricsTest, BoundsNumbersAndUsesFixedStatusAndFailureLabels)
 {
     Metrics metrics;

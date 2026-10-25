@@ -115,6 +115,42 @@ void DownstreamTransport::async_write(HttpResponse& response, Completion complet
                               });
         });
 }
+void DownstreamTransport::async_stream_header(std::shared_ptr<StreamWriter> writer,
+                                              Completion completion)
+{
+    impl_->with_stream(
+        [&](auto& stream)
+        {
+            http::async_write_header(stream, writer->serializer,
+                                     [writer, completion = std::move(completion)](
+                                         const boost::system::error_code& error, std::size_t)
+                                     {
+                                         completion(error);
+                                     });
+        });
+}
+void DownstreamTransport::async_stream_body(std::shared_ptr<StreamWriter> writer,
+                                            std::shared_ptr<StreamBlock> block, std::size_t bytes,
+                                            bool final, Completion completion)
+{
+    writer->response.body().data = block->bytes.data();
+    writer->response.body().size = bytes;
+    writer->response.body().more = !final;
+    impl_->with_stream(
+        [&](auto& stream)
+        {
+            http::async_write(stream, writer->serializer,
+                              [writer, block, final, completion = std::move(completion)](
+                                  const boost::system::error_code& error, std::size_t)
+                              {
+                                  // buffer_body requests the next block only after this block was
+                                  // written.
+                                  completion(!final && error == http::error::need_buffer
+                                                 ? boost::system::error_code{}
+                                                 : error);
+                              });
+        });
+}
 void DownstreamTransport::async_shutdown(Completion completion)
 {
     impl_->tls_->async_shutdown(std::move(completion));

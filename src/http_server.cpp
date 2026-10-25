@@ -445,8 +445,9 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
 #ifdef APIGATE_HTTP_SESSION_TESTING
     [[nodiscard]] detail::SessionWriteSnapshot write_snapshot() const noexcept
     {
-        return {!finished_ && phase_ == detail::SessionPhase::writing && response_.has_value(),
-                response_ ? response_->body().size() : 0};
+        return {!finished_ && phase_ == detail::SessionPhase::writing &&
+                    (response_.has_value() || stream_pending_bytes_ != 0),
+                response_ ? response_->body().size() : stream_pending_bytes_};
     }
 #endif
 
@@ -825,7 +826,41 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
                         self->on_proxy_aborted();
                     }
                 },
-                pool_);
+                pool_,
+                StreamCallbacks{
+                    [weak_self = weak_from_this()](HttpResponse header, detail::StreamResume resume)
+                    {
+                        if (const auto self = weak_self.lock())
+                        {
+                            self->write_stream_header(std::move(header), std::move(resume));
+                        }
+                        else
+                        {
+                            resume(asio::error::operation_aborted);
+                        }
+                    },
+                    [weak_self = weak_from_this()](std::shared_ptr<detail::StreamBlock> block,
+                                                   std::size_t bytes, bool final,
+                                                   detail::StreamResume resume)
+                    {
+                        if (const auto self = weak_self.lock())
+                        {
+                            self->write_stream_body(std::move(block), bytes, final,
+                                                    std::move(resume));
+                        }
+                        else
+                        {
+                            resume(asio::error::operation_aborted);
+                        }
+                    },
+                    [weak_self = weak_from_this(), method](std::optional<ProxyFailure> failure,
+                                                           bool downstream_failed)
+                    {
+                        if (const auto self = weak_self.lock())
+                        {
+                            self->on_stream_complete(method, failure, downstream_failed);
+                        }
+                    }});
             proxy_exchange_ = exchange;
             exchange->start();
             parser_.reset();
@@ -854,6 +889,96 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
                 close_socket();
             }
         }
+    }
+
+    void write_stream_header(HttpResponse header, detail::StreamResume resume)
+    {
+        if (finished_ || stopping_)
+        {
+            resume(asio::error::operation_aborted);
+            return;
+        }
+        if (draining_ || requests_served_ >= max_requests_per_connection)
+        {
+            header.keep_alive(false);
+        }
+        stream_close_ = header.need_eof();
+        stream_status_ = header.result_int();
+        static_cast<void>(observation_.finish(metrics_.get(), stream_status_,
+                                              detail::RequestObservation::Clock::now()));
+        stream_writer_ = std::make_shared<detail::StreamWriter>(std::move(header));
+        phase_ = detail::SessionPhase::writing;
+        stream_.expires_after(request_timeout);
+        stream_.async_stream_header(stream_writer_,
+                                    [self = shared_from_this(), resume = std::move(resume)](
+                                        const boost::system::error_code& error) noexcept
+                                    {
+                                        self->run_handler(
+                                            [&]
+                                            {
+                                                resume(error);
+                                            });
+                                    });
+    }
+
+    void write_stream_body(std::shared_ptr<detail::StreamBlock> block, std::size_t bytes,
+                           bool final, detail::StreamResume resume)
+    {
+        if (finished_ || stopping_)
+        {
+            resume(asio::error::operation_aborted);
+            return;
+        }
+        stream_pending_bytes_ = bytes;
+        stream_.expires_after(request_timeout);
+        stream_.async_stream_body(stream_writer_, std::move(block), bytes, final,
+                                  [self = shared_from_this(), resume = std::move(resume)](
+                                      const boost::system::error_code& error) noexcept
+                                  {
+                                      self->stream_pending_bytes_ = 0;
+                                      self->run_handler(
+                                          [&]
+                                          {
+                                              resume(error);
+                                          });
+                                  });
+    }
+
+    void on_stream_complete(http::verb method, std::optional<ProxyFailure> failure,
+                            bool downstream_failed) noexcept
+    {
+        run_handler(
+            [&]
+            {
+                proxy_exchange_.reset();
+                proxy_permit_.reset();
+                stream_writer_.reset();
+                if (finished_ || stopping_)
+                {
+                    return;
+                }
+                if (failure || downstream_failed)
+                {
+                    if (failure)
+                    {
+                        const auto& value = *failure;
+                        observation_.fail_stream(metrics_.get(), value.stage);
+                        log_proxy_failure(value, stream_status_);
+                    }
+                    logger_.warn("http_response_stream_failed", {{"status", stream_status_}});
+                    close_socket();
+                    return;
+                }
+                log_request_completed(proxy_method_name(method), "proxy", stream_status_);
+                if (stream_close_ || draining_)
+                {
+                    graceful_close();
+                }
+                else
+                {
+                    read_request();
+                }
+            });
     }
 
     void on_proxy_complete(http::verb method, ProxyResult result) noexcept
@@ -1106,6 +1231,12 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         {
             return;
         }
+        if (proxy_exchange_)
+        {
+            proxy_exchange_->cancel();
+            proxy_exchange_.reset();
+        }
+        proxy_permit_.reset();
         boost::system::error_code operation_error;
         const auto shutdown_error =
             stream_.socket().shutdown(tcp::socket::shutdown_send, operation_error);
@@ -1147,6 +1278,10 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
     std::shared_ptr<detail::UpstreamPool> pool_;
     std::optional<http::request_parser<http::string_body>> parser_;
     std::optional<HttpResponse> response_;
+    std::shared_ptr<detail::StreamWriter> stream_writer_;
+    std::size_t stream_pending_bytes_{0};
+    unsigned int stream_status_{0};
+    bool stream_close_{false};
     detail::BufferBudgetPermit response_body_permit_;
     std::shared_ptr<HttpProxyExchange> proxy_exchange_;
     std::optional<detail::ProxyPermit> proxy_permit_;

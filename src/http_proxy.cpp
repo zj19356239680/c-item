@@ -209,12 +209,13 @@ HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRe
     return upstream;
 }
 
-HttpResponse make_downstream_response(const HttpRequest& request, HttpResponse upstream_response)
+HttpResponse make_downstream_header(const HttpRequest& request,
+                                    const http::response_header<>& upstream_response)
 {
     HttpResponse response{upstream_response.result(), request.version()};
     response.reason(upstream_response.reason());
-    const auto dynamic_tokens = connection_tokens(upstream_response.base());
-    for (const auto& field : upstream_response.base())
+    const auto dynamic_tokens = connection_tokens(upstream_response);
+    for (const auto& field : upstream_response)
     {
         const std::string_view name{field.name_string().data(), field.name_string().size()};
         if (is_hop_by_hop(name, dynamic_tokens) || field.name() == http::field::server ||
@@ -226,6 +227,12 @@ HttpResponse make_downstream_response(const HttpRequest& request, HttpResponse u
     }
     response.set(http::field::server, "ApiGate");
     response.keep_alive(request.keep_alive());
+    return response;
+}
+
+HttpResponse make_downstream_response(const HttpRequest& request, HttpResponse upstream_response)
+{
+    auto response = make_downstream_header(request, upstream_response.base());
     response.body() = std::move(upstream_response.body());
     response.prepare_payload();
     return response;
@@ -241,7 +248,7 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
          std::shared_ptr<detail::BufferBudgetState> buffer_budget,
          std::shared_ptr<detail::BufferBudgetPermit> request_body_permit,
          CompletionCallback on_complete, AbortCallback on_abort,
-         std::shared_ptr<detail::UpstreamPool> pool)
+         std::shared_ptr<detail::UpstreamPool> pool, StreamCallbacks streaming)
         : tls_context_(std::move(tls_context)),
           resolver_(executor),
           pool_(std::move(pool)),
@@ -251,6 +258,7 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
           upstream_request_(detail::make_upstream_request(selected, request, pool_ != nullptr)),
           buffer_budget_(std::move(buffer_budget)),
           request_body_permit_(std::move(request_body_permit)),
+          streaming_(std::move(streaming)),
           on_complete_(std::move(on_complete)),
           on_abort_(std::move(on_abort))
     {
@@ -265,6 +273,16 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
         if (!on_abort_)
         {
             throw std::invalid_argument("proxy abort callback must not be empty");
+        }
+        if (selected.stream_response)
+        {
+            if (!streaming_.header || !streaming_.body || !streaming_.finish)
+            {
+                throw std::invalid_argument("streaming callbacks must not be empty");
+            }
+            stream_parser_ = std::make_unique<http::response_parser<http::buffer_body>>();
+            stream_parser_->body_limit(max_upstream_body_bytes);
+            stream_parser_->header_limit(max_upstream_header_bytes);
         }
         if (pool_)
         {
@@ -482,15 +500,19 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
         with_stream(
             [&](auto& stream)
             {
-                http::async_read_header(
-                    stream, buffer_, response_parser_,
-                    [self = shared_from_this()](const boost::system::error_code& read_error,
-                                                std::size_t) noexcept
+                with_parser(
+                    [&](auto& parser)
                     {
-                        self->run_handler(
-                            [self, &read_error]
+                        http::async_read_header(
+                            stream, buffer_, parser,
+                            [self = shared_from_this()](const boost::system::error_code& read_error,
+                                                        std::size_t) noexcept
                             {
-                                self->on_read_header(read_error);
+                                self->run_handler(
+                                    [self, &read_error]
+                                    {
+                                        self->on_read_header(read_error);
+                                    });
                             });
                     });
             });
@@ -509,6 +531,11 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
                                    ? ProxyFailureStage::response_too_large
                                    : ProxyFailureStage::read;
             fail(stage, error);
+            return;
+        }
+        if (stream_parser_)
+        {
+            start_stream();
             return;
         }
         if (response_parser_.get().result_int() < 200U)
@@ -558,6 +585,182 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
                                 self->on_read_body(read_error);
                             });
                     });
+            });
+    }
+
+    template <typename Action>
+    void with_parser(Action&& action)
+    {
+        if (stream_parser_)
+        {
+            std::forward<Action>(action)(*stream_parser_);
+        }
+        else
+        {
+            std::forward<Action>(action)(response_parser_);
+        }
+    }
+
+    detail::StreamResume resume_stream(bool final)
+    {
+        return [self = shared_from_this(), final](const boost::system::error_code& error) noexcept
+        {
+            self->run_handler(
+                [self, final, &error]
+                {
+                    if (self->completion_claimed())
+                    {
+                        return;
+                    }
+                    if (error)
+                    {
+                        self->cancel_operations();
+                        self->complete_stream(std::nullopt, true);
+                    }
+                    else if (final)
+                    {
+                        self->finish_stream();
+                    }
+                    else
+                    {
+                        self->read_stream_block();
+                    }
+                });
+        };
+    }
+
+    void start_stream()
+    {
+        auto& parser = *stream_parser_;
+        const auto& original = parser.get();
+        if (original.result_int() < 200U || original.find(http::field::upgrade) != original.end())
+        {
+            fail(ProxyFailureStage::invalid_response, {});
+            return;
+        }
+        const auto length = parser.content_length();
+        if (length && *length > max_upstream_body_bytes)
+        {
+            fail(ProxyFailureStage::response_too_large, http::error::body_limit);
+            return;
+        }
+        stream_block_ = std::make_shared<detail::StreamBlock>();
+        if (!parser.is_done())
+        {
+            const auto available = buffer_budget_->max_bytes() - buffer_budget_->current_bytes();
+            const auto bytes = std::min<std::uint64_t>(16384, available);
+            auto permit = bytes == 0 ? std::nullopt : buffer_budget_->try_acquire(bytes);
+            if (!permit)
+            {
+                reject_buffer_budget(1);
+                return;
+            }
+            stream_block_->permit = std::move(*permit);
+            stream_block_->bytes.resize(static_cast<std::size_t>(bytes));
+        }
+        auto header = detail::make_downstream_header(downstream_request_, original.base());
+        if (!parser.is_done())
+        {
+            if (length)
+            {
+                header.content_length(length);
+            }
+            else if (header.version() >= 11)
+            {
+                header.chunked(true);
+            }
+            else
+            {
+                header.keep_alive(false);
+            }
+        }
+        else if (original.result() != http::status::no_content &&
+                 original.result() != http::status::not_modified)
+        {
+            header.content_length(0);
+        }
+        stream_started_ = true;
+        streaming_.header(std::move(header), resume_stream(parser.is_done()));
+    }
+
+    void read_stream_block()
+    {
+        auto& parser = *stream_parser_;
+        auto block = stream_block_;
+        parser.get().body().data = block->bytes.data();
+        parser.get().body().size = block->bytes.size();
+        with_stream(
+            [&](auto& stream)
+            {
+                http::async_read_some(
+                    stream, buffer_, parser,
+                    [self = shared_from_this(), block](const boost::system::error_code& error,
+                                                       std::size_t) noexcept
+                    {
+                        self->run_handler(
+                            [self, block, &error]
+                            {
+                                if (self->completion_claimed())
+                                {
+                                    return;
+                                }
+                                if (error && error != http::error::need_buffer)
+                                {
+                                    self->fail(error == http::error::body_limit
+                                                   ? ProxyFailureStage::response_too_large
+                                                   : ProxyFailureStage::read,
+                                               error);
+                                    return;
+                                }
+                                auto& current = *self->stream_parser_;
+                                const auto bytes = block->bytes.size() - current.get().body().size;
+                                if (bytes == 0 && !current.is_done())
+                                {
+                                    self->read_stream_block();
+                                    return;
+                                }
+                                self->streaming_.body(block, bytes, current.is_done(),
+                                                      self->resume_stream(current.is_done()));
+                            });
+                    });
+            });
+    }
+
+    void finish_stream()
+    {
+        auto& parser = *stream_parser_;
+        const auto& original = parser.get();
+        const bool reusable = pool_ && parser.is_done() && !parser.need_eof() &&
+                              original.keep_alive() && buffer_.size() == 0 &&
+                              !connection_tokens(original.base()).contains("upgrade") &&
+                              connection_->clean();
+        finish_deadline();
+        if (reusable)
+        {
+            pool_->put(std::move(connection_));
+        }
+        else
+        {
+            close_upstream();
+        }
+        complete_stream(std::nullopt, false);
+    }
+
+    void complete_stream(std::optional<ProxyFailure> failure, bool downstream_failed)
+    {
+        detail::run_proxy_completion_action(
+            completion_state_,
+            [this, failure, downstream_failed]
+            {
+                completion_observed_ = true;
+                on_complete_ = nullptr;
+                auto finish = std::move(streaming_.finish);
+                finish(failure, downstream_failed);
+                on_abort_ = nullptr;
+            },
+            [this]() noexcept
+            {
+                notify_abort();
             });
     }
 
@@ -627,6 +830,11 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
         }
         finish_deadline();
         cancel_operations();
+        if (stream_started_)
+        {
+            complete_stream(ProxyFailure{stage, error.value()}, false);
+            return;
+        }
         const auto failure = stage == ProxyFailureStage::timeout ? GatewayFailure::gateway_timeout
                                                                  : GatewayFailure::bad_gateway;
         auto response = make_gateway_error_response(downstream_request_, failure);
@@ -751,6 +959,10 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
     beast::flat_buffer buffer_{max_upstream_header_bytes};
     http::response_parser<http::string_body> response_parser_;
     detail::BufferBudgetPermit response_body_permit_;
+    std::unique_ptr<http::response_parser<http::buffer_body>> stream_parser_;
+    std::shared_ptr<detail::StreamBlock> stream_block_;
+    StreamCallbacks streaming_;
+    bool stream_started_{false};
     CompletionCallback on_complete_;
     AbortCallback on_abort_;
     detail::ProxyCompletionState completion_state_;
@@ -764,13 +976,14 @@ HttpProxyExchange::HttpProxyExchange(
     const HttpRequest& request, std::shared_ptr<UpstreamTlsContext> tls_context,
     std::shared_ptr<detail::BufferBudgetState> buffer_budget,
     std::shared_ptr<detail::BufferBudgetPermit> request_body_permit, CompletionCallback on_complete,
-    AbortCallback on_abort, std::shared_ptr<detail::UpstreamPool> pool)
+    AbortCallback on_abort, std::shared_ptr<detail::UpstreamPool> pool, StreamCallbacks streaming)
     // Boost.Asio's resolver service calls its final shutdown hook during service destruction;
     // the analyzer reports this library-owned, non-polymorphic cleanup as virtual dispatch.
     // NOLINTNEXTLINE(clang-analyzer-optin.cplusplus.VirtualCall)
     : impl_(std::make_shared<Impl>(executor, selected, request, std::move(tls_context),
                                    std::move(buffer_budget), std::move(request_body_permit),
-                                   std::move(on_complete), std::move(on_abort), std::move(pool)))
+                                   std::move(on_complete), std::move(on_abort), std::move(pool),
+                                   std::move(streaming)))
 {
 }
 

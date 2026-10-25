@@ -172,11 +172,11 @@ std::string Metrics::render(const AppConfig& config, const AcceptCapacityState& 
         out.number(failures_[index]);
         out.append("\n");
     }
-    out.family(
-        {"request_processing_seconds", "summary",
-         "Complete request dispatch to final response ready; excludes upload, downstream write, "
-         "early parse rejections, cancellation without response and metrics requests. "
-         "Population differs from http_responses_total."});
+    out.family({"request_processing_seconds", "summary",
+                "Complete request dispatch to response ready (streaming: header ready); excludes "
+                "upload, downstream write, "
+                "early parse rejections, cancellation without response and metrics requests. "
+                "Population differs from http_responses_total."});
     out.append("apigate_request_processing_seconds_sum ");
     out.number(processing_sum_);
     out.append("\napigate_request_processing_seconds_count ");
@@ -257,7 +257,14 @@ void RequestObservation::reject(Metrics* metrics, RejectionReason reason) noexce
 }
 void RequestObservation::fail(Metrics* metrics, ProxyFailureStage stage) noexcept
 {
-    if (metrics && !excluded_ && !completed_ && !failed_)
+    if (!completed_)
+    {
+        fail_stream(metrics, stage);
+    }
+}
+void RequestObservation::fail_stream(Metrics* metrics, ProxyFailureStage stage) noexcept
+{
+    if (metrics && !excluded_ && !failed_)
     {
         failed_ = true;
         metrics->upstream_failure(stage);

@@ -2,7 +2,7 @@
 
 ApiGate 是一个用于学习和逐步开发 API 网关的 C++20 项目。当前版本提供异步
 HTTP/1.1 健康检查、配置校验、JSON 日志，以及可选的路径路由与多个静态 HTTP/HTTPS 上游。
-代理支持 GET 及有界正文的 POST、PUT、PATCH、同一路由多实例轮询，以及可选主动健康检查与故障摘除。支持默认关闭的 HTTP/HTTPS 上游连接池。它没有流式上传、重试、
+代理支持 GET 及有界正文的 POST、PUT、PATCH、同一路由多实例轮询，以及可选主动健康检查与故障摘除。支持默认关闭的 HTTP/HTTPS 上游连接池和按静态路由开启的流式响应。它没有流式上传、重试、
 缓存、每客户端或分布式限流、用户账号/角色授权或 HTTP/2；支持可选下游 TLS 和路由级 API Key 认证。按路由限流不构成生产容量保证。
 不要把它当作生产网关。本项目在 Linux 环境下开发，
 仅支持 Linux 构建与运行。
@@ -88,7 +88,7 @@ DELETE、OPTIONS、CONNECT 及其他方法返回 405。上游解析、连接、�
 
 `APIGATE_MAX_IN_FLIGHT_BYTES` 是进程内所有 session 和代理交换共享的**缓冲正文逻辑
 预约预算**。已知 `Content-Length` 的下游请求按长度预约，chunked 或未知长度请求按
-完整 64 KiB 预约；已知长度的上游响应按长度预约，chunked 或未知长度响应按完整
+完整 64 KiB 预约；默认缓冲模式的已知长度上游响应按长度预约，chunked 或未知长度响应按完整
 1 MiB 预约。正文读完后，保守预约会缩减到实际大小。预算不足时不继续读取对应正文：
 下游请求返回 503 后强制关闭连接且不访问上游，上游响应则关闭该上游交换并返回 503；
 两者正文均为
@@ -97,7 +97,7 @@ DELETE、OPTIONS、CONNECT 及其他方法返回 405。上游解析、连接、�
 正常完成、错误、断连、超时和停机取消都会自动归还。
 
 代理会移除请求和响应中的标准 hop-by-hop 头以及 `Connection` 动态列出的头，覆盖
-上游 `Host`，按缓冲后的实际正文重建 `Content-Length`，并将下游 `Server` 保持为
+上游 `Host`，默认按缓冲后的实际正文重建 `Content-Length`，并将下游 `Server` 保持为
 `ApiGate`。`Content-Type`、`Authorization`、`Cookie` 等
 端到端请求头在公开路由和旧单上游模式下保持转发；受保护路由认证成功后移除 Authorization，
 不把网关密钥传给上游。这些头不会写入 ApiGate 日志。客户端提供的
@@ -120,6 +120,40 @@ allocator 使用量或生产容量硬上限；正文复制和分配容量还可�
 排空期限；这仍视为操作者请求并返回 0。期限到达和第二次信号是两个独立的强制清理
 来源。当前没有预排空 HTTP API 或独立管理端口；这些停机行为也不构成生产就绪保证。
 外部进程管理器的强制终止期限仍应为取消回调和进程清理保留余量。
+
+## 可选流式响应
+
+静态路由可增加 `"stream_response": true`，两种后端形式均支持，严格 JSON boolean，
+省略或 false 保持完整缓冲。旧单上游环境模式保持缓冲。示例：
+
+```bash
+export APIGATE_ROUTES='[{"prefix":"/api","host":"127.0.0.1","port":9001,"stream_response":true}]'
+curl --no-buffer http://127.0.0.1:8080/api/example
+```
+
+按原始路径选择路由一次，认证、限流、健康后端选择与连接池规则保持不变。
+流式模式完整校验响应头后即可转发正文前段；HTTP/HTTPS 两侧均支持。已知长度保留准确
+Content-Length，未知长度对 HTTP/1.1 重新 chunked 编码，对 HTTP/1.0 关闭定界；
+不转发原始 chunk 标记或 trailers，无正文状态不附加正文。
+
+请求仍先完整缓冲，最大 64 KiB；响应解析后的正文总量仍最多 1 MiB。已知超限在响应头前
+拒绝，未知长度逐块累计校验，不解压响应。单个正文块最多 16 KiB，按剩余全局正文预算
+缩小（无需预算至少 16 KiB），第一次预约发生在响应头发送前，失败返回安全 503。
+一块写完才读取下一块，不预读排队；另有固定最多 16 KiB 的上游解析输入缓冲。
+正文块及其预算持有至必要读写回调结束；请求副本仍使用原预约，代理名额持有至整个
+流式交换完成或取消。TLS、内核缓冲等额外开销不由该逻辑预算度量，预算不是 RSS 上限。
+
+上游响应头和正文仍共享一次读取总期限，包含下游背压等待，不按块刷新；每次下游写入
+另有现有 10 秒期限。响应头尚未开始写出时沿用安全 502/503/504；开始后不能更改状态，
+截断、超限、超时和断连只取消并关闭，不追加 JSON 或 chunked 正常终止标记。
+客户端可能收到不完整响应，不能仅凭状态或响应头认为传输成功。没有自动重试或故障转移。
+成功完整转发后才允许按原安全条件归池，任何失败均丢弃；排空允许已分派流完成，
+deadline 或第二信号立即取消，不为失败流等待 TLS close_notify。
+
+状态及处理耗时在响应头准备写出时各观察一次，耗时不包含后续流式正文转发；晚期真实
+上游失败仍计入原失败指标，下游断连及正常取消不计上游故障。正常完成才记录
+http_request_completed，晚期失败记录安全的 http_response_stream_failed。
+该切片用于提前交付和有界缓冲，不支持无限响应、SSE 保活、大文件下载或生产容量保证。
 
 ## 构建、测试与运行
 
@@ -501,7 +535,7 @@ UTF-8、LF，末行有 LF；`Content-Type: text/plain; version=0.0.4; charset=ut
 | `apigate_http_responses_total{status="200"}` | 为下游生成的最终响应数，不保证成功送达；本地、代理及早期协议拒绝均统计，每请求最多一次，写失败不重计，直接关闭无状态。status 固定为 100–599 或 other。 |
 | `apigate_rejections_total{reason="rate_limit"}` | 实际本地准入拒绝，固定 reason 为 rate_limit、proxy_capacity、buffer_capacity、no_healthy_upstream；上游自己返回 429/503 不算。 |
 | `apigate_upstream_failures_total{stage="timeout"}` | 业务代理失败，固定 stage 为 resolve、connect、handshake、write、read、timeout、response_too_large、invalid_response；排除健康探测、正常取消和普通上游 4xx/5xx。 |
-| `apigate_request_processing_seconds_sum`、`_count` | 无 quantile 的 summary：单调时钟，从完整请求进入 process_request 到最终响应准备进入下游写出。包含业务上游处理，不含请求头等待、正文上传或下游写出。早期解析拒绝和未生成最终响应的取消不计样本，因此统计集合与响应计数不同。 |
+| `apigate_request_processing_seconds_sum`、`_count` | 无 quantile 的 summary：单调时钟，从完整请求进入 process_request 到最终响应准备进入下游写出；流式模式截止于响应头准备写出，包含到该时刻的上游处理。后续上游失败仍单独计数，不补记第二个 HTTP 状态。不含请求头等待、正文上传或下游写出。早期解析拒绝和未生成最终响应的取消不计样本，因此统计集合与响应计数不同。 |
 | `apigate_active_connections`、`apigate_max_connections` | 真实当前下游连接数（包含抓取连接）及上限；连接容量通过暂停 accept 背压，不生成虚构的拒绝指标。 |
 | `apigate_active_proxies`、`apigate_max_concurrent_proxies` | 现有业务代理 permit 占用及上限。 |
 | `apigate_in_flight_body_bytes`、`apigate_max_in_flight_body_bytes` | 现有逻辑正文预算占用及上限，单位字节。 |
