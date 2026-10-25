@@ -134,7 +134,7 @@ bash scripts/run.sh --version
 ```
 
 `check.sh` 包含格式检查、clang-tidy、警告即错误、ASan/UBSan 构建和测试。
-构建脚本默认限制并发：分析构建为 2，Debug/Release 为 3，限制同时运行的重型
+构建脚本默认限制并发：分析构建为 3，Debug/Release 为 4，限制同时运行的重型
 clang-tidy/编译进程数量。直接使用构建预设也采用相同默认值。
 需要调整时可运行 `CMAKE_BUILD_PARALLEL_LEVEL=1 bash scripts/check.sh`，或
 `CMAKE_BUILD_PARALLEL_LEVEL=2 bash scripts/build.sh linux-debug`；脚本只接受
