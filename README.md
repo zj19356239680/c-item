@@ -3,7 +3,7 @@
 ApiGate 是一个用于学习和逐步开发 API 网关的 C++20 项目。当前版本提供异步
 HTTP/1.1 健康检查、配置校验、JSON 日志，以及可选的路径路由与多个静态 HTTP/HTTPS 上游。
 代理支持 GET 及有界正文的 POST、PUT、PATCH、同一路由多实例轮询，以及可选主动健康检查与故障摘除。支持默认关闭的 HTTP/HTTPS 上游连接池。它没有流式上传、重试、
-缓存、每客户端或分布式限流、认证或 HTTP/2；支持可选下游 TLS。按路由限流不构成生产容量保证。
+缓存、每客户端或分布式限流、用户账号/角色授权或 HTTP/2；支持可选下游 TLS 和路由级 API Key 认证。按路由限流不构成生产容量保证。
 不要把它当作生产网关。本项目在 Linux 环境下开发，
 仅支持 Linux 构建与运行。
 
@@ -99,7 +99,8 @@ DELETE、OPTIONS、CONNECT 及其他方法返回 405。上游解析、连接、�
 代理会移除请求和响应中的标准 hop-by-hop 头以及 `Connection` 动态列出的头，覆盖
 上游 `Host`，按缓冲后的实际正文重建 `Content-Length`，并将下游 `Server` 保持为
 `ApiGate`。`Content-Type`、`Authorization`、`Cookie` 等
-端到端请求头会转发给所配置上游，但不会写入 ApiGate 日志。客户端提供的
+端到端请求头在公开路由和旧单上游模式下保持转发；受保护路由认证成功后移除 Authorization，
+不把网关密钥传给上游。这些头不会写入 ApiGate 日志。客户端提供的
 `X-Forwarded-*` 不会被信任或转发，本阶段也不生成这些头。启用代理不会改变本地
 健康端点；`/readyz` 仍不主动探测上游。
 
@@ -386,6 +387,62 @@ HTTP keep-alive、请求/响应边界、路由、原始 query、限流、轮询�
 TLS 是传输加密，**不是认证**；未要求客户端证书。启用后 `/metrics` 仍无访问认证，任何
 能访问该监听器的客户端仍可读取，不代表仅可信客户端可访问。首版仅单份证书，不提供
 mTLS、SNI 多证书、0-RTT、HTTP/2、ACME、签发或证书热更新，也不构成完整生产就绪保证。
+
+### 可选路由级 API Key 认证
+
+静态路由可选 `auth`，省略即公开。两种后端形式都支持；旧 `APIGATE_UPSTREAM_*` 模式不增加
+认证配置。`auth` 必须是只含字符串 `api_key_env` 的非空对象，拒绝 null、类型错误、重复、
+未知字段及非法嵌套。示例只含环境变量引用，**不要将密钥写入路由 JSON**：
+
+```json
+[{"prefix":"/private","host":"127.0.0.1","port":9001,"strip_prefix":true,"auth":{"api_key_env":"APIGATE_AUTH_KEY_PRIVATE"}}]
+```
+
+引用名必须是 `APIGATE_AUTH_KEY_` 加 1–64 个大写字母、数字或下划线。引用的密钥必须为
+32–256 字节 ASCII 字母、数字、下划线或连字符，不修剪或自动纠正。启动时读取一次；缺失、
+空值、非法引用/密钥会在监听前安全失败，不回显密钥或环境变量值。受保护路由必须同时配置
+下游 TLS 证书和私钥，没有允许明文密钥的绕过开关。`--check-config` 校验并报告安全的
+`authenticated_route_count`，不输出引用值或摘要；`--version` 不读取配置。
+
+通过安全的进程环境注入高熵密钥，不把真实值写入源码、环境示例、历史命令或日志。交互示例
+只引用变量和明确占位符，不提供可用密钥：
+
+```bash
+IFS= read -r -s -p 'API Key: ' APIGATE_AUTH_KEY_PRIVATE
+printf '\n'
+export APIGATE_AUTH_KEY_PRIVATE
+APIGATE_TLS_CERT_FILE='<PEM_CERT_CHAIN_PATH>' \
+APIGATE_TLS_KEY_FILE='<PEM_PRIVATE_KEY_PATH>' \
+APIGATE_ROUTES='[{"prefix":"/private","host":"127.0.0.1","port":9001,"strip_prefix":true,"auth":{"api_key_env":"APIGATE_AUTH_KEY_PRIVATE"}}]' \
+bash scripts/run.sh
+```
+
+在客户端安全注入同一变量后，保留证书链和主机身份验证，并通过标准输入提供头，避免把
+展开后的密钥放入 curl 参数：
+
+```bash
+printf 'Authorization: Bearer %s\n' "$APIGATE_AUTH_KEY_PRIVATE" | \
+  curl --cacert '<TRUSTED_CA_PATH>' --header @- https://localhost:8080/private/item
+```
+
+认证要求恰好一个 Authorization 头；Bearer 方案大小写不敏感，凭据为单个合法密钥。
+重复头、空值、逗号列表、多凭据、错误方案或错误密钥统一返回 401，安全 JSON 错误码
+`authentication_failed`、`WWW-Authenticate: Bearer realm="ApiGate"` 和 `Cache-Control: no-store`。
+不从 query、Cookie 或正文取密钥。公开路由及旧单上游的 Authorization 转发行为不变。
+
+顺序是完整读取请求并校验协议 → 按原始路径最长前缀选路 → 认证 → 路由限流 → 代理名额 →
+健康后端/轮询选择 → 借用连接池/访问上游。只选路一次，失败不回退；strip_prefix 不重新选路
+或认证。更具体路由只使用自身规则，不继承父路由；每个 keep-alive 请求独立认证。
+401 沿原响应计数、耗时和写出链处理，不计为上游失败、限流或容量拒绝；失败不消费令牌、
+推进轮询或申请代理名额。**认证在正文读取之后，不能阻止未认证客户端上传正文**，仍受既有
+大小、超时和全局正文预算限制，正文占用在响应完成/关闭后归还。
+
+本地 `/healthz`、`/readyz` 和启用后的精确 `/metrics` 豁免；`/metrics` 仍无访问认证，不能把
+路由认证描述为整个监听器访问控制。长期配置只保留 OpenSSL SHA-256 的固定长度摘要，使用
+固定 32 字节 CRYPTO_memcmp 比较；不记录凭据、摘要、完整路径或 query。不宣称进程内存
+秘密完全清除，原始环境和处理中的请求仍可能含有密钥。
+这是单路由、单密钥、启动时配置的不透明字符串认证，不是 JWT，不解析身份或角色；不包含
+轮换/热更新、OAuth、用户账号、外部密钥管理或生产就绪保证。长度合法不等于密钥强度足够。
 
 ### 可选上游连接池
 

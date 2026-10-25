@@ -38,6 +38,7 @@ struct SelectedUpstream
     std::string_view prefix;
     bool strip_prefix{false};
     std::optional<std::size_t> route_index{std::nullopt};
+    bool strip_authorization{false};
 };
 
 // Matches a route without selecting a backend or advancing any runtime state.
@@ -48,10 +49,12 @@ struct SelectedRoute
     std::string_view prefix;
     bool strip_prefix{false};
     std::optional<std::size_t> route_index{std::nullopt};
+    const ApiKeyAuthConfig* auth{nullptr};
 };
 
 [[nodiscard]] std::optional<SelectedRoute> select_http_route(const AppConfig& config,
                                                              const HttpRequest& request) noexcept;
+[[nodiscard]] HttpResponse make_authentication_failed_response(const HttpRequest& request);
 [[nodiscard]] HttpResponse make_gateway_error_response(const HttpRequest& request,
                                                        GatewayFailure failure);
 [[nodiscard]] HttpResponse make_rate_limited_response(const HttpRequest& request,

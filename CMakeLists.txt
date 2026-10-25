@@ -48,6 +48,7 @@ add_library(apigate_core
     src/application.cpp
     src/buffer_budget.cpp
     src/config.cpp
+    src/api_key_auth.cpp
     src/downstream_tls.cpp
     src/downstream_transport.cpp
     src/health_check.cpp
@@ -82,6 +83,7 @@ if(BUILD_TESTING)
     add_executable(apigate_unit_tests
         tests/unit/buffer_budget_test.cpp
         tests/unit/config_test.cpp
+        tests/unit/api_key_auth_test.cpp
         tests/unit/metrics_test.cpp
         tests/unit/health_check_test.cpp
         tests/unit/http_handler_test.cpp
@@ -122,6 +124,10 @@ if(BUILD_TESTING)
         COMMAND ${Python3_EXECUTABLE}
                 ${PROJECT_SOURCE_DIR}/tests/integration/build_parallelism_test.py)
     set_tests_properties(integration.build_parallelism PROPERTIES TIMEOUT 15)
+    add_test(NAME integration.api_key_auth
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/api_key_auth_test.py
+                $<TARGET_FILE:api-gate>)
+    set_tests_properties(integration.api_key_auth PROPERTIES TIMEOUT 40)
     add_test(NAME integration.downstream_tls
         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/downstream_tls_test.py
                 $<TARGET_FILE:api-gate>)

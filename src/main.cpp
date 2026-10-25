@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
@@ -83,6 +84,10 @@ void print_help()
         << "                       each timeout_ms defaults to 3000; per-route round robin, no "
            "retry;\n"
         << "                       scheme is http (default) or https; port is always required;\n"
+        << "                       auth: {api_key_env: APIGATE_AUTH_KEY_<NAME>}; requires "
+           "downstream TLS;\n"
+        << "                       referenced key: 32-256 ASCII letters/digits/_/-; never embed "
+           "keys in JSON.\n"
         << "                       strip_prefix is an optional boolean (default: false);\n"
         << "                       rate_limit optionally requires requests_per_second and burst\n"
         << "                       (integers 1-1000000); omitted means unlimited;\n"
@@ -153,6 +158,12 @@ int main(int argc, char* argv[])
                 {"metrics_enabled", config.metrics_enabled},
                 {"upstream_keep_alive", config.upstream_keep_alive},
                 {"tls_enabled", config.downstream_tls_context != nullptr},
+                {"authenticated_route_count",
+                 std::ranges::count_if(config.routes,
+                                       [](const apigate::RouteConfig& route)
+                                       {
+                                           return route.auth.has_value();
+                                       })},
                 {"proxy_enabled", config.upstream.has_value() || !config.routes.empty()}};
             if (!config.routes.empty())
             {

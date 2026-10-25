@@ -186,7 +186,8 @@ HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRe
     for (const auto& field : request.base())
     {
         const std::string_view name{field.name_string().data(), field.name_string().size()};
-        if (is_hop_by_hop(name, dynamic_tokens) || is_forwarding_metadata(name) ||
+        if ((selected.strip_authorization && field.name() == http::field::authorization) ||
+            is_hop_by_hop(name, dynamic_tokens) || is_forwarding_metadata(name) ||
             field.name() == http::field::host || field.name() == http::field::content_length ||
             field.name() == http::field::expect)
         {

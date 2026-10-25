@@ -128,8 +128,13 @@ std::optional<SelectedRoute> select_http_route(const AppConfig& config,
         if (prefix.size() > longest && path.starts_with(prefix) &&
             (prefix == "/" || path.size() == prefix.size() || path[prefix.size()] == '/'))
         {
+            const ApiKeyAuthConfig* auth = nullptr;
+            if (route.auth)
+            {
+                auth = &*route.auth;
+            }
             selected.emplace(
-                SelectedRoute{route.upstreams, route.prefix, route.strip_prefix, index});
+                SelectedRoute{route.upstreams, route.prefix, route.strip_prefix, index, auth});
             longest = prefix.size();
         }
     }
@@ -196,6 +201,15 @@ HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& req
     }
     return make_json_response(request, http::status::not_found,
                               {{"error", {{"code", "not_found"}, {"message", "route not found"}}}});
+}
+
+HttpResponse make_authentication_failed_response(const HttpRequest& request)
+{
+    auto response = make_json_response(
+        request, http::status::unauthorized,
+        {{"error", {{"code", "authentication_failed"}, {"message", "authentication failed"}}}});
+    response.set(http::field::www_authenticate, "Bearer realm=\"ApiGate\"");
+    return response;
 }
 
 HttpResponse make_rate_limited_response(const HttpRequest& request,

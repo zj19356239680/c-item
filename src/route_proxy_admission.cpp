@@ -66,7 +66,8 @@ RouteProxyAdmissionResult RouteProxyAdmission::try_acquire(const SelectedRoute& 
         next = index == route.upstreams.size() - 1 ? 0 : index + 1;
     }
     result.upstream.emplace(SelectedUpstream{route.upstreams[index], route.prefix,
-                                             route.strip_prefix, route.route_index});
+                                             route.strip_prefix, route.route_index,
+                                             route.auth != nullptr});
     return result;
 }
 

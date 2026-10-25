@@ -14,6 +14,7 @@
 #include <system_error>
 #include <utility>
 
+#include "api_key_auth.hpp"
 #include "downstream_tls.hpp"
 #include "upstream_tls.hpp"
 
@@ -349,7 +350,8 @@ void validate_route_prefix(std::string_view prefix)
                 }
                 keys[0].clear();
             }
-            else if (depth == 2 && (route_key == "rate_limit" || route_key == "health_check"))
+            else if (depth == 2 && (route_key == "rate_limit" || route_key == "health_check" ||
+                                    route_key == "auth"))
             {
                 keys[1].clear();
             }
@@ -368,6 +370,10 @@ void validate_route_prefix(std::string_view prefix)
         }
         if (event == Json::parse_event_t::key)
         {
+            if (depth == 3 && route_key == "auth" && parsed != "api_key_env")
+            {
+                throw ConfigError("APIGATE_ROUTES auth contains an unknown field");
+            }
             if (depth < 2 || depth > 4 ||
                 !keys.at(static_cast<std::size_t>(depth - 2))
                      .insert(parsed.get<std::string>())
@@ -408,7 +414,7 @@ void validate_route_prefix(std::string_view prefix)
             if (item.key() != "prefix" && item.key() != "host" && item.key() != "port" &&
                 item.key() != "timeout_ms" && item.key() != "strip_prefix" &&
                 item.key() != "rate_limit" && item.key() != "upstreams" && item.key() != "scheme" &&
-                item.key() != "health_check")
+                item.key() != "health_check" && item.key() != "auth")
             {
                 throw ConfigError("APIGATE_ROUTES entry contains an unknown field");
             }
@@ -538,8 +544,38 @@ void validate_route_prefix(std::string_view prefix)
             }
             health_check = std::move(settings);
         }
+        std::optional<ApiKeyAuthConfig> auth;
+        if (entry.contains("auth"))
+        {
+            const auto& settings = entry.at("auth");
+            if (!settings.is_object() || settings.size() != 1 ||
+                !settings.contains("api_key_env") || !settings.at("api_key_env").is_string())
+            {
+                throw ConfigError("APIGATE_ROUTES auth requires only an api_key_env string");
+            }
+            const auto reference = settings.at("api_key_env").get<std::string>();
+            if (!detail::valid_api_key_reference(reference))
+            {
+                throw ConfigError("APIGATE_ROUTES auth key reference is invalid");
+            }
+            // Read once and hash directly from the environment; do not copy the raw key
+            // into the JSON document or long-lived configuration.
+            const char* key_value = raw_environment(reference.c_str());
+            if (key_value == nullptr || !detail::valid_api_key(key_value))
+            {
+                throw ConfigError("referenced authentication key is missing or invalid");
+            }
+            try
+            {
+                auth = detail::hash_api_key(key_value);
+            }
+            catch (...)
+            {
+                throw ConfigError("authentication key configuration failed");
+            }
+        }
         routes.push_back({std::move(prefix), std::move(upstreams), strip_prefix, rate_limit,
-                          std::move(health_check)});
+                          std::move(health_check), auth});
     }
     return routes;
 }
@@ -619,6 +655,14 @@ AppConfig load_config_from_environment()
     if (const auto routes = read_environment("APIGATE_ROUTES"))
     {
         config.routes = parse_routes(*routes);
+        if (!config.downstream_tls_context && std::ranges::any_of(config.routes,
+                                                                  [](const RouteConfig& route)
+                                                                  {
+                                                                      return route.auth.has_value();
+                                                                  }))
+        {
+            throw ConfigError("protected routes require downstream TLS");
+        }
         const bool https_enabled = std::ranges::any_of(
             config.routes,
             [](const RouteConfig& route)

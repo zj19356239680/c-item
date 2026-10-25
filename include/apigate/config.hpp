@@ -1,6 +1,7 @@
 #ifndef APIGATE_CONFIG_HPP_
 #define APIGATE_CONFIG_HPP_
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -54,6 +55,11 @@ struct HealthCheckConfig
     std::uint32_t healthy_threshold{2};
 };
 
+struct ApiKeyAuthConfig
+{
+    std::array<unsigned char, 32> digest{};
+};
+
 struct RouteConfig
 {
     std::string prefix;
@@ -61,6 +67,7 @@ struct RouteConfig
     bool strip_prefix{false};
     std::optional<RateLimitConfig> rate_limit{std::nullopt};
     std::optional<HealthCheckConfig> health_check{std::nullopt};
+    std::optional<ApiKeyAuthConfig> auth{std::nullopt};
 };
 
 struct AppConfig

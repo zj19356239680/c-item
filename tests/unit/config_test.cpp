@@ -1,6 +1,7 @@
 #include "apigate/config.hpp"
 
 #include <gtest/gtest.h>
+#include <openssl/rand.h>
 #include <openssl/ssl.h>
 
 #include <cerrno>
@@ -87,6 +88,7 @@ class ConfigTest : public testing::Test
         unsetenv("APIGATE_UPSTREAM_CA_FILE");
         unsetenv("APIGATE_ROUTES");
         unsetenv("APIGATE_METRICS_ENABLED");
+        unsetenv("APIGATE_AUTH_KEY_UNIT_TEST");
         unsetenv("APIGATE_TLS_CERT_FILE");
         unsetenv("APIGATE_TLS_KEY_FILE");
     }
@@ -111,6 +113,101 @@ TEST_F(ConfigTest, UsesSafeDefaults)
     EXPECT_TRUE(config.routes.empty());
     EXPECT_FALSE(config.upstream_tls_context);
     EXPECT_FALSE(config.downstream_tls_context);
+}
+
+TEST_F(ConfigTest, AuthObjectsReferencesAndNestedFieldsAreCheckedBeforeTlsRequirement)
+{
+    using Json = nlohmann::json;
+    const Json base{{"prefix", "/private"}, {"host", "localhost"}, {"port", 1}};
+    for (const auto& auth :
+         Json::array({nullptr,
+                      false,
+                      1,
+                      "invalid",
+                      Json::array(),
+                      Json::object(),
+                      {{"api_key_env", 1}},
+                      {{"api_key_env", nullptr}},
+                      {{"api_key_env", Json::object()}},
+                      {{"api_key_env", "APIGATE_AUTH_KEY_UNIT_TEST"}, {"extra", "private-marker"}},
+                      {{"api_key_env", "APIGATE_AUTH_KEY_"}},
+                      {{"api_key_env", "OTHER"}},
+                      {{"api_key_env", "APIGATE_AUTH_KEY_lower"}},
+                      {{"api_key_env", "APIGATE_AUTH_KEY_" + std::string(65, 'A')}}}))
+    {
+        auto entry = base;
+        entry["auth"] = auth;
+        const auto raw = Json::array({entry}).dump();
+        ASSERT_EQ(setenv("APIGATE_ROUTES", raw.c_str(), 1), 0);
+        try
+        {
+            static_cast<void>(apigate::load_config_from_environment());
+            FAIL() << "expected invalid auth rejection";
+        }
+        catch (const apigate::ConfigError& error)
+        {
+            EXPECT_EQ(std::string_view{error.what()}.find("protected routes require"),
+                      std::string_view::npos);
+            EXPECT_EQ(std::string_view{error.what()}.find("private-marker"),
+                      std::string_view::npos);
+        }
+    }
+    for (
+        const auto* raw :
+        {R"([{"prefix":"/","host":"localhost","port":1,"auth":{"api_key_env":"A","api_key_env":"B"}}])",
+         R"([{"prefix":"/","host":"localhost","port":1,"auth":{},"auth":{}}])",
+         R"([{"prefix":"/","host":"localhost","port":1,"auth":{"api_key_env":[{}]}}])"})
+    {
+        ASSERT_EQ(setenv("APIGATE_ROUTES", raw, 1), 0);
+        EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()),
+                     apigate::ConfigError);
+    }
+}
+
+TEST_F(ConfigTest, ReferencedAuthKeysHaveStrictBoundsAndRequireDownstreamTls)
+{
+    std::array<unsigned char, 32> bytes{};
+    ASSERT_EQ(RAND_bytes(bytes.data(), static_cast<int>(bytes.size())), 1);
+    std::string key;
+    constexpr std::string_view alphabet = "0123456789abcdef";
+    for (const auto byte : bytes)
+    {
+        key += alphabet[byte >> 4U];
+        key += alphabet[byte & 15U];
+    }
+    ASSERT_EQ(setenv("APIGATE_ROUTES", R"([{"prefix":"/","host":"localhost","port":1,
+        "auth":{"api_key_env":"APIGATE_AUTH_KEY_UNIT_TEST"}}])",
+                     1),
+              0);
+    const auto check_error = [](std::string_view expected)
+    {
+        try
+        {
+            static_cast<void>(apigate::load_config_from_environment());
+            FAIL() << "expected authentication configuration rejection";
+        }
+        catch (const apigate::ConfigError& error)
+        {
+            EXPECT_TRUE(std::string_view{error.what()} == expected);
+        }
+    };
+    check_error("referenced authentication key is missing or invalid");
+    std::string maximum_key;
+    for (int count = 0; count < 4; ++count)
+    {
+        maximum_key.append(key);
+    }
+    for (const auto& value :
+         {std::string{}, key.substr(0, 31), key + " ", key + ",", key + ".", maximum_key + "x"})
+    {
+        ASSERT_EQ(setenv("APIGATE_AUTH_KEY_UNIT_TEST", value.c_str(), 1), 0);
+        check_error("referenced authentication key is missing or invalid");
+    }
+    for (const auto& value : {key.substr(0, 32), maximum_key})
+    {
+        ASSERT_EQ(setenv("APIGATE_AUTH_KEY_UNIT_TEST", value.c_str(), 1), 0);
+        check_error("protected routes require downstream TLS");
+    }
 }
 
 TEST_F(ConfigTest, DownstreamTlsRejectsMissingEmptyAndInvalidFilesWithoutEchoingPaths)

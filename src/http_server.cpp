@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "api_key_auth.hpp"
 #include "apigate/config.hpp"
 #include "apigate/http_handler.hpp"
 #include "apigate/logging.hpp"
@@ -644,8 +645,20 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         const auto& request = parser_->get();
         if (const auto route = select_http_route(config_, request))
         {
+            const auto& selected = *route;
+            if (selected.auth && !detail::authenticate_api_key(*selected.auth, request))
+            {
+                auto response = make_authentication_failed_response(request);
+                if (requests_served_ >= max_requests_per_connection)
+                {
+                    response.keep_alive(false);
+                }
+                log_request_completed(request.method_string(), "proxy", response.result_int());
+                write_response(std::move(response));
+                return;
+            }
             phase_ = detail::SessionPhase::proxying;
-            start_proxy_request(request, *route);
+            start_proxy_request(request, selected);
             return;
         }
         auto response = handle_http_request(config_, request);
