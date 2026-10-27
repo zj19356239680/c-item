@@ -41,17 +41,31 @@ bool valid_api_key(std::string_view key) noexcept
                                           character == '-';
                                });
 }
-ApiKeyAuthConfig hash_api_key(std::string_view key)
+ApiKeyDigest hash_api_key(std::string_view key)
 {
-    ApiKeyAuthConfig result;
+    ApiKeyDigest result{};
     unsigned int length = 0;
-    if (EVP_Digest(key.data(), key.size(), result.digest.data(), &length, EVP_sha256(), nullptr) !=
-            1 ||
-        length != result.digest.size())
+    if (EVP_Digest(key.data(), key.size(), result.data(), &length, EVP_sha256(), nullptr) != 1 ||
+        length != result.size())
     {
         throw std::runtime_error("API key digest calculation failed");
     }
     return result;
+}
+bool matches_api_key_digest(const ApiKeyAuthConfig& config, const ApiKeyDigest& candidate) noexcept
+{
+    if (config.key_count == 0 || config.key_count > config.digests.size())
+    {
+        return false;
+    }
+    unsigned int matched = 0;
+    for (std::size_t index = 0; index < config.key_count; ++index)
+    {
+        // Always compare the whole configured set, independent of the matching position.
+        matched |= static_cast<unsigned int>(
+            CRYPTO_memcmp(config.digests[index].data(), candidate.data(), candidate.size()) == 0);
+    }
+    return matched != 0;
 }
 bool authenticate_api_key(const ApiKeyAuthConfig& config, const HttpRequest& request)
 {
@@ -80,6 +94,6 @@ bool authenticate_api_key(const ApiKeyAuthConfig& config, const HttpRequest& req
         return false;
     }
     const auto candidate = hash_api_key(value);
-    return CRYPTO_memcmp(config.digest.data(), candidate.digest.data(), config.digest.size()) == 0;
+    return matches_api_key_digest(config, candidate);
 }
 }  // namespace apigate::detail

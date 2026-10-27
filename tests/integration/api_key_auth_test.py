@@ -24,8 +24,8 @@ AUTH_B = "APIGATE_AUTH_KEY_TEST_B"
 def configured(binary, root, routes, keys, tls=True, port=0):
     environment = build_test_environment({"APIGATE_ROUTES": routes if isinstance(routes, str) else json.dumps(routes),
                                           "APIGATE_LISTEN_PORT": str(port), **keys})
-    environment.pop(AUTH_A, None)
-    environment.pop(AUTH_B, None)
+    for reference in (AUTH_A, AUTH_B, "APIGATE_AUTH_KEY_TEST_C", "APIGATE_AUTH_KEY_TEST_D"):
+        environment.pop(reference, None)
     environment.update(keys)
     if tls:
         environment.update(APIGATE_TLS_CERT_FILE=str(root / "server.pem"),
@@ -205,6 +205,95 @@ def test_routes_and_admission(binary, root, key_a, key_b):
         print("API key auth: unauthorized upstream count=0, per-request auth, token/round-robin order and permit/body recovery passed")
 
 
+def test_key_set_configuration(binary, root, keys):
+    references = list(keys)
+    base = {"prefix": "/private", "host": "localhost", "port": 1}
+    markers = [*keys.values(), *references,
+               *(hashlib.sha256(value.encode()).hexdigest() for value in keys.values())]
+    for backend in (base, {"prefix": "/private", "upstreams": [{"host": "localhost", "port": 1}]}):
+        for selected in (references[:1], references):
+            route = {**backend, "auth": {"api_key_envs": selected}}
+            result = configured(binary, root, [route], keys)
+            assert result.returncode == 0 and not result.stderr
+            assert json.loads(result.stdout)["payload"]["authenticated_route_count"] == 1
+            assert all(marker.encode() not in result.stdout for marker in markers)
+        for settings in ({"api_key_envs": []}, {"api_key_envs": references + [references[0]]},
+                         {"api_key_envs": [references[0], references[0]]},
+                         {"api_key_envs": references, "api_key_env": references[0]},
+                         {"api_key_envs": [[references[0]]]}, {"api_key_envs": [{}]},
+                         {"api_key_envs": references, "unknown": "private-marker"}):
+            result = configured(binary, root, [{**backend, "auth": settings}], keys)
+            assert result.returncode != 0 and not result.stdout
+            assert all(marker.encode() not in result.stderr for marker in markers)
+        duplicate_values = {**keys, references[-1]: keys[references[0]]}
+        route = {**backend, "auth": {"api_key_envs": references}}
+        result = configured(binary, root, [route], duplicate_values)
+        assert result.returncode != 0 and all(marker.encode() not in result.stderr for marker in markers)
+        for reference in references:
+            for invalid in (None, "", "short", "private-invalid-key-with-space-at-end "):
+                changed = dict(keys)
+                if invalid is None:
+                    changed.pop(reference)
+                else:
+                    changed[reference] = invalid
+                result = configured(binary, root, [route], changed)
+                assert result.returncode != 0 and not result.stdout
+                assert all(marker.encode() not in result.stderr for marker in markers)
+        assert configured(binary, root, [route], keys, tls=False).returncode != 0
+    help_result = run(binary, ["--help"], {})
+    assert help_result.returncode == 0 and b"api_key_envs" in help_result.stdout
+
+
+def test_staged_rotation(binary, root, key_old, key_new, unconfigured):
+    markers = {"old key": key_old, "new key": key_new, "unconfigured key": unconfigured,
+               "old digest": hashlib.sha256(key_old.encode()).hexdigest(),
+               "new digest": hashlib.sha256(key_new.encode()).hexdigest()}
+    phases = (({"api_key_env": AUTH_A}, {key_old}),
+              ({"api_key_envs": [AUTH_A, AUTH_B]}, {key_old, key_new}),
+              ({"api_key_envs": [AUTH_B]}, {key_new}))
+    with ExitStack() as backends:
+        backend = PoolBackend(backends)
+        for phase, (auth, accepted) in enumerate(phases):
+            with ExitStack() as resources:
+                base = {"host": "127.0.0.1", "port": backend.port}
+                route = {"prefix": "/private", "strip_prefix": True, "auth": auth,
+                         **(base if phase == 0 else {"upstreams": [base]})}
+                # Overlap also exercises the unchanged streaming/pool path after authentication.
+                route["stream_response"] = phase == 1
+                service, _, client = start(resources, binary, root, APIGATE_ROUTES=json.dumps([route]),
+                    APIGATE_UPSTREAM_KEEP_ALIVE="true", APIGATE_MAX_IN_FLIGHT_BYTES="128",
+                    **{AUTH_A: key_old, AUTH_B: key_new})
+                connection = client()
+                snapshot = scrape(connection)
+                original_socket = connection.sock
+                for index, candidate in enumerate((key_old, key_new, key_old, key_new, unconfigured, None)):
+                    before = backend.state.request_count()
+                    before_accepts = backend.accepts
+                    if candidate not in accepted:
+                        payload = denied(connection, authorization=("Bearer " + candidate) if candidate else None)
+                        assert all(value.encode() not in payload for value in markers.values())
+                        assert backend.state.request_count() == before
+                        assert backend.accepts == before_accepts
+                    else:
+                        body = b"rotation-post" if index % 2 else None
+                        connection.request("POST" if body else "GET", "/private/item?raw=%2f", body=body,
+                                           headers={"Authorization": "Bearer " + candidate})
+                        response = connection.getresponse()
+                        assert response.status == 200 and response.read() == b"ok"
+                        received = backend.state.requests.get(timeout=2)
+                        assert received["authorization"] is None
+                        assert received["path"] == "/item?raw=%2f" and received["body"] == (body or b"")
+                        assert backend.state.request_count() == before + 1
+                    assert connection.sock is original_socket
+                values = scrape(connection)
+                assert values["apigate_active_proxies"] == values["apigate_in_flight_body_bytes"] == 0
+                assert failures(values) == failures(snapshot) == 0
+                stop_service(service)
+                logs(service, markers)
+                connection.close()
+    print("rotation: old-only -> old+new -> new-only across restarts; same TLS keep-alive reauth, denied upstream delta=0, credentials stripped")
+
+
 def test_legacy_forwarding(binary, root):
     with ExitStack() as resources:
         backend = PoolBackend(resources)
@@ -226,6 +315,11 @@ def main():
     with tempfile.TemporaryDirectory(prefix="apigate-auth-tls-") as directory:
         root = certificate_files(directory)
         test_config(binary, root, key_a)
+        extra_keys = {AUTH_A: key_a, AUTH_B: key_b,
+                      "APIGATE_AUTH_KEY_TEST_C": secrets.token_hex(32),
+                      "APIGATE_AUTH_KEY_TEST_D": secrets.token_hex(32)}
+        test_key_set_configuration(binary, root, extra_keys)
+        test_staged_rotation(binary, root, key_a, key_b, secrets.token_hex(32))
         test_routes_and_admission(binary, root, key_a, key_b)
         test_legacy_forwarding(binary, root)
     print("route API key configuration and verified HTTPS acceptance passed")

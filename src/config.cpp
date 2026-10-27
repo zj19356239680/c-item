@@ -324,21 +324,45 @@ void validate_route_prefix(std::string_view prefix)
     std::size_t object_count = 0;
     std::size_t upstream_count = 0;
     bool in_upstreams = false;
-    const auto callback = [&keys, &route_key, &object_count, &upstream_count, &in_upstreams](
-                              int depth, Json::parse_event_t event, Json& parsed)
+    std::string auth_key;
+    bool in_key_envs = false;
+    std::size_t reference_count = 0;
+    const auto callback = [&keys, &route_key, &object_count, &upstream_count, &in_upstreams,
+                           &auth_key, &in_key_envs,
+                           &reference_count](int depth, Json::parse_event_t event, Json& parsed)
     {
         if (event == Json::parse_event_t::array_start && depth != 0)
         {
-            if (depth != 2 || route_key != "upstreams")
+            if (depth == 2 && route_key == "upstreams")
+            {
+                upstream_count = 0;
+                in_upstreams = true;
+            }
+            else if (depth == 3 && route_key == "auth" && auth_key == "api_key_envs")
+            {
+                reference_count = 0;
+                in_key_envs = true;
+            }
+            else
             {
                 throw ConfigError("APIGATE_ROUTES contains an invalid nested array");
             }
-            upstream_count = 0;
-            in_upstreams = true;
         }
         if (event == Json::parse_event_t::array_end && depth == 2)
         {
             in_upstreams = false;
+        }
+        if (event == Json::parse_event_t::array_end && depth == 3)
+        {
+            in_key_envs = false;
+        }
+        if (event == Json::parse_event_t::value && depth == 4 && in_key_envs)
+        {
+            if (!parsed.is_string() || parsed.get_ref<const std::string&>().empty() ||
+                ++reference_count > ApiKeyAuthConfig::max_keys)
+            {
+                throw ConfigError("APIGATE_ROUTES auth requires 1-4 nonempty key references");
+            }
         }
         if (event == Json::parse_event_t::object_start)
         {
@@ -354,6 +378,7 @@ void validate_route_prefix(std::string_view prefix)
                                     route_key == "auth"))
             {
                 keys[1].clear();
+                auth_key.clear();
             }
             else if (depth == 3 && in_upstreams && route_key == "upstreams")
             {
@@ -370,9 +395,13 @@ void validate_route_prefix(std::string_view prefix)
         }
         if (event == Json::parse_event_t::key)
         {
-            if (depth == 3 && route_key == "auth" && parsed != "api_key_env")
+            if (depth == 3 && route_key == "auth")
             {
-                throw ConfigError("APIGATE_ROUTES auth contains an unknown field");
+                if (parsed != "api_key_env" && parsed != "api_key_envs")
+                {
+                    throw ConfigError("APIGATE_ROUTES auth contains an unknown field");
+                }
+                auth_key = parsed.get<std::string>();
             }
             if (depth < 2 || depth > 4 ||
                 !keys.at(static_cast<std::size_t>(depth - 2))
@@ -550,31 +579,74 @@ void validate_route_prefix(std::string_view prefix)
         {
             const auto& settings = entry.at("auth");
             if (!settings.is_object() || settings.size() != 1 ||
-                !settings.contains("api_key_env") || !settings.at("api_key_env").is_string())
+                (!settings.contains("api_key_env") && !settings.contains("api_key_envs")))
             {
-                throw ConfigError("APIGATE_ROUTES auth requires only an api_key_env string");
+                throw ConfigError("APIGATE_ROUTES auth requires exactly one key reference field");
             }
-            const auto reference = settings.at("api_key_env").get<std::string>();
-            if (!detail::valid_api_key_reference(reference))
+            std::vector<std::string> references;
+            if (settings.contains("api_key_env"))
             {
-                throw ConfigError("APIGATE_ROUTES auth key reference is invalid");
+                const auto& reference = settings.at("api_key_env");
+                if (!reference.is_string())
+                {
+                    throw ConfigError("APIGATE_ROUTES auth requires an api_key_env string");
+                }
+                references.push_back(reference.get<std::string>());
             }
-            // Read once and hash directly from the environment; do not copy the raw key
-            // into the JSON document or long-lived configuration.
-            const char* key_value = raw_environment(reference.c_str());
-            if (key_value == nullptr || !detail::valid_api_key(key_value))
+            else
             {
-                throw ConfigError("referenced authentication key is missing or invalid");
+                const auto& values = settings.at("api_key_envs");
+                if (!values.is_array() || values.empty() ||
+                    values.size() > ApiKeyAuthConfig::max_keys)
+                {
+                    throw ConfigError("APIGATE_ROUTES auth requires 1-4 nonempty key references");
+                }
+                for (const auto& reference : values)
+                {
+                    if (!reference.is_string() || reference.get_ref<const std::string&>().empty())
+                    {
+                        throw ConfigError(
+                            "APIGATE_ROUTES auth requires 1-4 nonempty key references");
+                    }
+                    references.push_back(reference.get<std::string>());
+                }
             }
-            try
+            ApiKeyAuthConfig configured;
+            std::set<std::string> unique_references;
+            for (const auto& reference : references)
             {
-                auth = detail::hash_api_key(key_value);
+                if (!detail::valid_api_key_reference(reference))
+                {
+                    throw ConfigError("APIGATE_ROUTES auth key reference is invalid");
+                }
+                if (!unique_references.insert(reference).second)
+                {
+                    throw ConfigError("authentication key configuration contains duplicates");
+                }
+                // Hash directly from the startup environment, without copying raw keys.
+                const char* key_value = raw_environment(reference.c_str());
+                if (key_value == nullptr || !detail::valid_api_key(key_value))
+                {
+                    throw ConfigError("referenced authentication key is missing or invalid");
+                }
+                ApiKeyDigest digest{};
+                try
+                {
+                    digest = detail::hash_api_key(key_value);
+                }
+                catch (...)
+                {
+                    throw ConfigError("authentication key configuration failed");
+                }
+                if (detail::matches_api_key_digest(configured, digest))
+                {
+                    throw ConfigError("authentication key configuration contains duplicates");
+                }
+                configured.digests[configured.key_count++] = digest;
             }
-            catch (...)
-            {
-                throw ConfigError("authentication key configuration failed");
-            }
+            auth = configured;
         }
+
         bool stream_response = false;
         if (entry.contains("stream_response"))
         {

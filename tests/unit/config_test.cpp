@@ -90,6 +90,10 @@ class ConfigTest : public testing::Test
         unsetenv("APIGATE_ROUTES");
         unsetenv("APIGATE_METRICS_ENABLED");
         unsetenv("APIGATE_AUTH_KEY_UNIT_TEST");
+        unsetenv("APIGATE_AUTH_KEY_UNIT_TEST_A");
+        unsetenv("APIGATE_AUTH_KEY_UNIT_TEST_B");
+        unsetenv("APIGATE_AUTH_KEY_UNIT_TEST_C");
+        unsetenv("APIGATE_AUTH_KEY_UNIT_TEST_D");
         unsetenv("APIGATE_TLS_CERT_FILE");
         unsetenv("APIGATE_TLS_KEY_FILE");
     }
@@ -208,6 +212,142 @@ TEST_F(ConfigTest, ReferencedAuthKeysHaveStrictBoundsAndRequireDownstreamTls)
     {
         ASSERT_EQ(setenv("APIGATE_AUTH_KEY_UNIT_TEST", value.c_str(), 1), 0);
         check_error("protected routes require downstream TLS");
+    }
+}
+
+TEST_F(ConfigTest, AuthKeySetsEnforceStructureUniquenessAndAtomicLoading)
+{
+    using Json = nlohmann::json;
+    const std::array<const char*, 4> references{
+        "APIGATE_AUTH_KEY_UNIT_TEST_A", "APIGATE_AUTH_KEY_UNIT_TEST_B",
+        "APIGATE_AUTH_KEY_UNIT_TEST_C", "APIGATE_AUTH_KEY_UNIT_TEST_D"};
+    std::array<std::string, 4> test_keys;
+    for (std::size_t index = 0; index < references.size(); ++index)
+    {
+        std::array<unsigned char, 32> bytes{};
+        ASSERT_EQ(RAND_bytes(bytes.data(), static_cast<int>(bytes.size())), 1);
+        constexpr std::string_view alphabet = "0123456789abcdef";
+        for (const auto byte : bytes)
+        {
+            test_keys[index] += alphabet[byte >> 4U];
+            test_keys[index] += alphabet[byte & 15U];
+        }
+        ASSERT_EQ(setenv(references[index], test_keys[index].c_str(), 1), 0);
+    }
+    const Json backends = Json::array(
+        {{{"prefix", "/"}, {"host", "localhost"}, {"port", 1}},
+         {{"prefix", "/"}, {"upstreams", Json::array({{{"host", "localhost"}, {"port", 1}}})}}});
+    const auto error_for = [&](const Json& backend, const Json& settings)
+    {
+        auto route = backend;
+        route["auth"] = settings;
+        const auto raw = Json::array({route}).dump();
+        if (setenv("APIGATE_ROUTES", raw.c_str(), 1) != 0)
+        {
+            ADD_FAILURE() << "test environment setup failed";
+            return std::string{};
+        }
+        try
+        {
+            static_cast<void>(apigate::load_config_from_environment());
+            ADD_FAILURE() << "expected configuration rejection before listening";
+        }
+        catch (const apigate::ConfigError& error)
+        {
+            const std::string message{error.what()};
+            for (const auto& key : test_keys)
+            {
+                EXPECT_TRUE(message.find(key) == std::string::npos);
+            }
+            for (const auto* reference : references)
+            {
+                EXPECT_TRUE(message.find(reference) == std::string::npos);
+            }
+            return message;
+        }
+        return std::string{};
+    };
+    for (const auto& backend : backends)
+    {
+        for (const auto& settings : Json::array({{{"api_key_env", references[0]}},
+                                                 {{"api_key_envs", Json::array({references[0]})}},
+                                                 {{"api_key_envs", references}}}))
+        {
+            // Reaching the TLS guard proves the whole auth set loaded successfully.
+            EXPECT_TRUE(error_for(backend, settings) == "protected routes require downstream TLS");
+        }
+        for (const auto& invalid : Json::array(
+                 {nullptr,
+                  false,
+                  1,
+                  "invalid",
+                  Json::object(),
+                  Json::array(),
+                  {{"api_key_envs", nullptr}},
+                  {{"api_key_envs", true}},
+                  {{"api_key_envs", references[0]}},
+                  {{"api_key_envs", Json::array()}},
+                  {{"api_key_envs", Json::array({""})}},
+                  {{"api_key_envs", Json::array({1})}},
+                  {{"api_key_envs", Json::array({nullptr})}},
+                  {{"api_key_envs", Json::array({Json::object()})}},
+                  {{"api_key_envs", Json::array({Json::array({references[0]})})}},
+                  {{"api_key_envs", Json::array({"OTHER"})}},
+                  {{"api_key_envs", Json::array({references[0], references[0]})}},
+                  {{"api_key_envs", Json::array({references[0], references[1], references[2],
+                                                 references[3], references[0]})}},
+                  {{"api_key_envs", references}, {"api_key_env", references[0]}},
+                  {{"api_key_envs", references}, {"unknown", "private-marker"}}}))
+        {
+            const auto error = error_for(backend, invalid);
+            EXPECT_FALSE(error.empty());
+            EXPECT_TRUE(error.find("protected routes require") == std::string::npos);
+        }
+        for (std::size_t index = 0; index < references.size(); ++index)
+        {
+            ASSERT_EQ(unsetenv(references[index]), 0);
+            EXPECT_TRUE(error_for(backend, {{"api_key_envs", references}}) ==
+                        "referenced authentication key is missing or invalid");
+            for (const auto* invalid : {"", "short", "invalid-key-with-a-space-at-the-end "})
+            {
+                ASSERT_EQ(setenv(references[index], invalid, 1), 0);
+                EXPECT_TRUE(error_for(backend, {{"api_key_envs", references}}) ==
+                            "referenced authentication key is missing or invalid");
+            }
+            ASSERT_EQ(setenv(references[index], test_keys[index].c_str(), 1), 0);
+        }
+        ASSERT_EQ(setenv(references.back(), test_keys.front().c_str(), 1), 0);
+        EXPECT_TRUE(error_for(backend, {{"api_key_envs", references}}) ==
+                    "authentication key configuration contains duplicates");
+        ASSERT_EQ(setenv(references.back(), test_keys.back().c_str(), 1), 0);
+    }
+    for (const auto* raw :
+         {R"([{"prefix":"/","host":"h","port":1,"auth":{"api_key_envs":[],"api_key_envs":[]}}])",
+          R"([{"prefix":"/","host":"h","port":1,"api_key_envs":["A"]}])",
+          R"([{"prefix":"/","host":"h","port":1,"rate_limit":{"api_key_envs":["A"]}}])",
+          R"([{"prefix":"/","upstreams":[{"host":"h","port":1,"auth":{"api_key_envs":["A"]}}]}])",
+          R"([{"prefix":"/","host":"h","port":1,"auth":{"api_key_envs":[["A"]]}}])"})
+    {
+        ASSERT_EQ(setenv("APIGATE_ROUTES", raw, 1), 0);
+        EXPECT_THROW(static_cast<void>(apigate::load_config_from_environment()),
+                     apigate::ConfigError);
+    }
+    // Invalid trailing JSON must not defer the array type/count checks until DOM validation.
+    for (
+        const auto* raw :
+        {R"([{"prefix":"/","host":"h","port":1,"auth":{"api_key_envs":[1, invalid)",
+         R"([{"prefix":"/","host":"h","port":1,"auth":{"api_key_envs":["A","B","C","D","E", invalid)"})
+    {
+        ASSERT_EQ(setenv("APIGATE_ROUTES", raw, 1), 0);
+        try
+        {
+            static_cast<void>(apigate::load_config_from_environment());
+            FAIL() << "expected parsing-time key set bounds";
+        }
+        catch (const apigate::ConfigError& error)
+        {
+            EXPECT_STREQ(error.what(), "APIGATE_ROUTES auth requires 1-4 nonempty key references");
+        }
     }
 }
 

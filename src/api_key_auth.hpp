@@ -10,7 +10,9 @@ namespace apigate::detail
 {
 [[nodiscard]] bool valid_api_key_reference(std::string_view reference) noexcept;
 [[nodiscard]] bool valid_api_key(std::string_view key) noexcept;
-[[nodiscard]] ApiKeyAuthConfig hash_api_key(std::string_view key);
+[[nodiscard]] ApiKeyDigest hash_api_key(std::string_view key);
+[[nodiscard]] bool matches_api_key_digest(const ApiKeyAuthConfig& config,
+                                          const ApiKeyDigest& candidate) noexcept;
 [[nodiscard]] bool authenticate_api_key(const ApiKeyAuthConfig& config, const HttpRequest& request);
 }  // namespace apigate::detail
 #endif  // APIGATE_API_KEY_AUTH_HPP_

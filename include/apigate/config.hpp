@@ -2,6 +2,7 @@
 #define APIGATE_CONFIG_HPP_
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -55,9 +56,13 @@ struct HealthCheckConfig
     std::uint32_t healthy_threshold{2};
 };
 
+using ApiKeyDigest = std::array<unsigned char, 32>;
+
 struct ApiKeyAuthConfig
 {
-    std::array<unsigned char, 32> digest{};
+    static constexpr std::size_t max_keys = 4;
+    std::array<ApiKeyDigest, max_keys> digests{};
+    std::size_t key_count{0};
 };
 
 struct RouteConfig

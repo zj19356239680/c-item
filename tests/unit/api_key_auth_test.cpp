@@ -32,6 +32,14 @@ std::string test_key(std::size_t length = 64)
     return result;
 }
 
+apigate::ApiKeyAuthConfig single_key_config(std::string_view key)
+{
+    apigate::ApiKeyAuthConfig config;
+    config.digests[0] = apigate::detail::hash_api_key(key);
+    config.key_count = 1;
+    return config;
+}
+
 TEST(ApiKeyAuthTest, ReferenceAndCredentialBoundariesAreStrictAscii)
 {
     using apigate::detail::valid_api_key;
@@ -60,8 +68,8 @@ TEST(ApiKeyAuthTest, ReferenceAndCredentialBoundariesAreStrictAscii)
 TEST(ApiKeyAuthTest, ExactlyOneBearerCredentialAndFixedDigestComparison)
 {
     const auto key = test_key();
-    const auto configured = apigate::detail::hash_api_key(key);
-    EXPECT_EQ(configured.digest.size(), 32U);
+    const auto configured = single_key_config(key);
+    EXPECT_EQ(configured.digests[0].size(), 32U);
     apigate::HttpRequest request{http::verb::get, "/private", 11};
     EXPECT_FALSE(authenticate_api_key(configured, request));
     for (const auto scheme : {"Bearer ", "bearer ", "bEaReR   "})
@@ -91,11 +99,38 @@ TEST(ApiKeyAuthTest, ExactlyOneBearerCredentialAndFixedDigestComparison)
     EXPECT_FALSE(authenticate_api_key(configured, request));
 }
 
+TEST(ApiKeyAuthTest, AcceptsEveryConfiguredPositionAndFailsClosedForInvalidCounts)
+{
+    std::array<std::string, 4> keys{test_key(), test_key(), test_key(), test_key()};
+    apigate::ApiKeyAuthConfig config;
+    for (const auto& key : keys)
+    {
+        config.digests[config.key_count++] = apigate::detail::hash_api_key(key);
+    }
+    apigate::HttpRequest request{http::verb::get, "/private", 11};
+    for (const auto& key : keys)
+    {
+        request.set(http::field::authorization, "Bearer " + key);
+        EXPECT_TRUE(authenticate_api_key(config, request));
+    }
+    request.set(http::field::authorization, "Bearer " + test_key());
+    EXPECT_FALSE(authenticate_api_key(config, request));
+    request.set(http::field::authorization, "Bearer " + keys.front());
+    request.insert(http::field::authorization, "Bearer " + keys.back());
+    EXPECT_FALSE(authenticate_api_key(config, request));
+    request.erase(http::field::authorization);
+    request.set(http::field::authorization, "Bearer " + keys.front());
+    config.key_count = 0;
+    EXPECT_FALSE(authenticate_api_key(config, request));
+    config.key_count = apigate::ApiKeyAuthConfig::max_keys + 1;
+    EXPECT_FALSE(authenticate_api_key(config, request));
+}
+
 TEST(ApiKeyAuthTest, LongestRouteOwnsRuleAndLocalEndpointsRemainExempt)
 {
     apigate::AppConfig config;
-    const auto parent = apigate::detail::hash_api_key(test_key());
-    const auto child = apigate::detail::hash_api_key(test_key());
+    const auto parent = single_key_config(test_key());
+    const auto child = single_key_config(test_key());
     config.routes = {
         {"/private", {{"localhost", 1}}, true, std::nullopt, std::nullopt, parent},
         {"/private/public", {{"localhost", 2}}},
@@ -131,12 +166,8 @@ TEST(ApiKeyAuthTest, ProtectedSelectionStripsAuthorizationWhilePublicAndLegacyPr
 {
     const auto key = test_key();
     apigate::AppConfig config;
-    config.routes = {{"/private",
-                      {{"localhost", 1}},
-                      true,
-                      std::nullopt,
-                      std::nullopt,
-                      apigate::detail::hash_api_key(key)}};
+    config.routes = {
+        {"/private", {{"localhost", 1}}, true, std::nullopt, std::nullopt, single_key_config(key)}};
     apigate::HttpRequest request{http::verb::post, "/private/item?raw=%2f", 11};
     request.body() = "payload";
     request.set(http::field::authorization, "Bearer " + key);
