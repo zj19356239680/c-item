@@ -3,6 +3,8 @@
 from contextlib import ExitStack
 import http.client
 import json
+import re
+import secrets
 from pathlib import Path
 import signal
 import socket
@@ -37,7 +39,7 @@ class StreamHandler(PoolHandler):
             return
         chunked = path in ("/chunked", "/late-large", "/chunk-truncated")
         eof = path == "/eof"
-        header = b"HTTP/1.1 200 OK\r\nX-End-To-End: kept\r\nX-Remove: secret\r\nConnection: X-Remove\r\n"
+        header = b"HTTP/1.1 200 OK\r\nX-Request-ID: backend-untrusted\r\nX-Request-ID: backend-other\r\nX-End-To-End: kept\r\nX-Remove: secret\r\nConnection: X-Remove\r\n"
         if chunked:
             header += b"Transfer-Encoding: chunked\r\n"
         elif eof:
@@ -288,11 +290,94 @@ def test_drain_and_disconnect(binary, root):
     print("HTTP/HTTPS disconnect/drain/deadline/second signal: terminated with bounded cleanup", flush=True)
 
 
+def test_request_ids(binary, root):
+    with ExitStack() as resources:
+        upstream = backend(resources)
+        upstream.release.set()
+        key = secrets.token_hex(32)
+        base = {"host": "127.0.0.1", "port": upstream.port, "strip_prefix": True}
+        routes = [{"prefix": "/s", **base, "stream_response": True},
+                  {"prefix": "/buffer", **base},
+                  {"prefix": "/private", **base, "auth": {"api_key_env": "APIGATE_AUTH_KEY_ID_TEST"}},
+                  {"prefix": "/limited", **base, "rate_limit": {"requests_per_second": 1, "burst": 1}}]
+        service, _, client = start(resources, binary, upstream, root, down_tls=True,
+            APIGATE_ROUTES=json.dumps(routes), APIGATE_AUTH_KEY_ID_TEST=key)
+        connection = client()
+        ids = []
+        def checked(response):
+            values = [value for name, value in response.getheaders() if name.lower() == "x-request-id"]
+            assert len(values) == 1 and re.fullmatch(r"[0-9a-f]{32}-[0-9a-f]{16}", values[0])
+            assert values[0] not in ids
+            ids.append(values[0])
+            return values[0]
+        original_socket = None
+        for _ in range(2):
+            connection.putrequest("GET", "/buffer/complete")
+            connection.putheader("X-Request-ID", "client-untrusted")
+            connection.putheader("x-request-id", "client-other")
+            connection.putheader("Connection", "keep-alive, X-Request-ID")
+            connection.endheaders()
+            response = connection.getresponse()
+            rid = checked(response)
+            assert response.read() == FIRST + LAST
+            assert upstream.state.requests.get(timeout=2)["request_ids"] == [rid]
+            if original_socket is None:
+                original_socket = connection.sock
+            assert connection.sock is original_socket
+        assert ids[0][:33] == ids[1][:33]
+        for method, target, expected in (("GET", "/healthz", 200), ("GET", "/missing", 404),
+                ("HEAD", "/private/item", 401), ("OPTIONS", "/healthz", 405),
+                ("GET", "/limited/complete", 200), ("GET", "/limited/complete", 429),
+                ("GET", "/buffer/truncated", 502)):
+            connection.request(method, target)
+            response = connection.getresponse()
+            checked(response)
+            assert response.status == expected
+            data = response.read()
+            if method == "HEAD":
+                assert data == b""
+        # A subsequent early parsing failure must not inherit the previous request ID.
+        connection.sock.sendall(b"GET / HTTP/1.1\r\nbroken header\r\n\r\n")
+        early = http.client.HTTPResponse(connection.sock)
+        early.begin()
+        assert early.status == 400 and early.getheader("X-Request-ID") is None
+        early.read()
+        connection.close()
+        upstream.release.clear()
+        candidate = client()
+        candidate.request("GET", "/s/truncated")
+        response = candidate.getresponse()
+        stream_id = checked(response)
+        assert response.read(5) == FIRST
+        upstream.release.set()
+        try:
+            response.read()
+        except http.client.IncompleteRead:
+            pass
+        else:
+            raise AssertionError("failed stream completed normally")
+        event = service.wait_for_event("http_response_stream_failed")
+        assert event["request_id"] == stream_id
+        values = scrape(client())
+        assert not any("request_id" in label for label in values)
+        stop_service(service)
+        records = [json.loads(line)["payload"] for line in service.lines]
+        completed = {entry["request_id"] for entry in records if entry.get("event") == "http_request_completed"}
+        assert set(ids[:-1]) <= completed
+        for entry in records:
+            if entry.get("event") == "http_upstream_request_failed":
+                assert entry["request_id"] in ids
+        output = "".join(service.lines)
+        assert key not in output and "client-untrusted" not in output and "backend-untrusted" not in output
+    print("request IDs: upstream/response/log match; keep-alive uniqueness, rejection, HEAD, early reset and late-stream failure passed", flush=True)
+
+
 def main():
     binary = str(Path(sys.argv[1]).resolve())
     with tempfile.TemporaryDirectory(prefix="apigate-stream-") as directory:
         root = Path(directory)
         certificate_files(root)
+        test_request_ids(binary, root)
         test_early_and_default(binary, root)
         test_framing_and_small_budget(binary, root)
         test_failures(binary, root)

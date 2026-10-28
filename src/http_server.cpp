@@ -32,6 +32,7 @@
 #include "http_proxy.hpp"
 #include "http_server_internal.hpp"
 #include "metrics.hpp"
+#include "request_id.hpp"
 #include "route_proxy_admission.hpp"
 #include "upstream_pool.hpp"
 
@@ -378,6 +379,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
     using CloseCallback = std::function<void(HttpSession*)>;
 
     HttpSession(tcp::socket socket, const AppConfig& config, StructuredLogger& logger,
+                std::shared_ptr<detail::RequestIds> request_ids,
                 std::shared_ptr<detail::ProxyAdmissionState> proxy_admission,
                 std::shared_ptr<detail::BufferBudgetState> buffer_budget,
                 std::shared_ptr<detail::RouteProxyAdmission> route_admission,
@@ -387,6 +389,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         : stream_(std::move(socket), config.downstream_tls_context),
           config_(config),
           logger_(logger),
+          request_ids_(std::move(request_ids)),
           proxy_admission_(std::move(proxy_admission)),
           buffer_budget_(std::move(buffer_budget)),
           route_admission_(std::move(route_admission)),
@@ -519,6 +522,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
             return;
         }
 
+        request_id_.clear();
         observation_ = {};
         phase_ = detail::SessionPhase::reading;
         auto& parser = detail::DownstreamTransport::reset_parser(parser_);
@@ -648,6 +652,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
             close_socket();
             return;
         }
+        request_id_ = request_ids_->next();
         observation_.begin(detail::RequestObservation::Clock::now());
         ++requests_served_;
         const auto& request = parser_->get();
@@ -867,7 +872,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
                         {
                             self->on_stream_complete(method, failure, downstream_failed);
                         }
-                    }});
+                    }},
+                request_id_);
             proxy_exchange_ = exchange;
             exchange->start();
             parser_.reset();
@@ -911,6 +917,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         }
         stream_close_ = head_response_ ? !header.keep_alive() : header.need_eof();
         stream_status_ = header.result_int();
+        detail::set_request_id(header.base(), request_id_);
         static_cast<void>(observation_.finish(metrics_.get(), stream_status_,
                                               detail::RequestObservation::Clock::now()));
         stream_writer_ = std::make_shared<detail::StreamWriter>(std::move(header));
@@ -972,7 +979,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
                         observation_.fail_stream(metrics_.get(), value.stage);
                         log_proxy_failure(value, stream_status_);
                     }
-                    logger_.warn("http_response_stream_failed", {{"status", stream_status_}});
+                    logger_.warn("http_response_stream_failed",
+                                 with_request_id({{"status", stream_status_}}));
                     close_socket();
                     return;
                 }
@@ -1035,13 +1043,23 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         close_socket();
     }
 
+    nlohmann::json with_request_id(nlohmann::json fields) const
+    {
+        if (!request_id_.empty())
+        {
+            fields["request_id"] = request_id_;
+        }
+        return fields;
+    }
+
     void log_proxy_failure(const ProxyFailure& failure, unsigned int status) noexcept
     {
         try
         {
-            logger_.warn("http_upstream_request_failed", {{"stage", to_string(failure.stage)},
-                                                          {"error_code", failure.error_code},
-                                                          {"status", status}});
+            logger_.warn("http_upstream_request_failed",
+                         with_request_id({{"stage", to_string(failure.stage)},
+                                          {"error_code", failure.error_code},
+                                          {"status", status}}));
         }
         catch (...)
         {
@@ -1054,9 +1072,9 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         try
         {
             logger_.warn("http_proxy_rejected_capacity",
-                         {{"active_proxies", proxy_admission_->active_proxies()},
-                          {"max_proxies", proxy_admission_->max_proxies()},
-                          {"status", status}});
+                         with_request_id({{"active_proxies", proxy_admission_->active_proxies()},
+                                          {"max_proxies", proxy_admission_->max_proxies()},
+                                          {"status", status}}));
         }
         catch (...)
         {
@@ -1070,11 +1088,11 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         try
         {
             logger_.warn("http_buffer_budget_rejected",
-                         {{"direction", direction},
-                          {"requested_bytes", requested_bytes},
-                          {"active_bytes", buffer_budget_->current_bytes()},
-                          {"max_bytes", buffer_budget_->max_bytes()},
-                          {"status", status}});
+                         with_request_id({{"direction", direction},
+                                          {"requested_bytes", requested_bytes},
+                                          {"active_bytes", buffer_budget_->current_bytes()},
+                                          {"max_bytes", buffer_budget_->max_bytes()},
+                                          {"status", status}}));
         }
         catch (...)
         {
@@ -1087,10 +1105,11 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
     {
         try
         {
-            logger_.info("http_request_completed", {{"method", method},
-                                                    {"route", route},
-                                                    {"status", status},
-                                                    {"remote_address", remote_address_}});
+            logger_.info("http_request_completed",
+                         with_request_id({{"method", method},
+                                          {"route", route},
+                                          {"status", status},
+                                          {"remote_address", remote_address_}}));
         }
         catch (...)
         {
@@ -1106,6 +1125,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         {
             return;
         }
+        detail::set_request_id(response.base(), request_id_);
         phase_ = detail::SessionPhase::writing;
         if (draining_)
         {
@@ -1174,7 +1194,8 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
             case detail::HttpWriteDisposition::unexpected_error:
                 try
                 {
-                    logger_.error("http_response_write_failed", {{"error_code", error.value()}});
+                    logger_.error("http_response_write_failed",
+                                  with_request_id({{"error_code", error.value()}}));
                 }
                 catch (...)
                 {
@@ -1278,6 +1299,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
     beast::flat_buffer buffer_{max_header_bytes + static_cast<std::size_t>(max_body_bytes)};
     const AppConfig& config_;
     StructuredLogger& logger_;
+    std::shared_ptr<detail::RequestIds> request_ids_;
     std::shared_ptr<detail::ProxyAdmissionState> proxy_admission_;
     std::shared_ptr<detail::BufferBudgetState> buffer_budget_;
     std::shared_ptr<detail::RouteProxyAdmission> route_admission_;
@@ -1296,6 +1318,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
     std::shared_ptr<HttpProxyExchange> proxy_exchange_;
     std::optional<detail::ProxyPermit> proxy_permit_;
     std::shared_ptr<detail::BufferBudgetPermit> request_body_permit_;
+    std::string request_id_;
     std::string remote_address_;
     std::size_t requests_served_{0};
     detail::SessionPhase phase_{detail::SessionPhase::reading};
@@ -1315,13 +1338,13 @@ detail::SessionWriteProbe detail::start_session_write_probe(
     std::function<void()> on_close)
 {
     auto route_admission = std::make_shared<RouteProxyAdmission>(config.routes, admission);
-    auto session = std::make_shared<HttpSession>(std::move(socket), config, logger,
-                                                 std::move(admission), std::move(budget),
-                                                 std::move(route_admission), nullptr, nullptr,
-                                                 [on_close = std::move(on_close)](HttpSession*)
-                                                 {
-                                                     on_close();
-                                                 });
+    auto session = std::make_shared<HttpSession>(
+        std::move(socket), config, logger, std::make_shared<RequestIds>(), std::move(admission),
+        std::move(budget), std::move(route_admission), nullptr, nullptr,
+        [on_close = std::move(on_close)](HttpSession*)
+        {
+            on_close();
+        });
     session->start();
     return {[session]
             {
@@ -1341,6 +1364,7 @@ class HttpServer::Impl
          std::function<void()> on_runtime_failure, std::function<void()> on_drain_complete)
         : config_(config),
           logger_(logger),
+          request_ids_(std::make_shared<detail::RequestIds>()),
           acceptor_(io_context),
           accept_retry_timer_(io_context),
           drain_timer_(io_context),
@@ -1567,8 +1591,8 @@ class HttpServer::Impl
         }
 
         auto session = std::make_shared<HttpSession>(
-            std::move(socket), config_, logger_, proxy_admission_, buffer_budget_, route_admission_,
-            metrics_, accept_capacity_,
+            std::move(socket), config_, logger_, request_ids_, proxy_admission_, buffer_budget_,
+            route_admission_, metrics_, accept_capacity_,
             [this](HttpSession* closed_session)
             {
                 remove_session(closed_session);
@@ -1852,6 +1876,7 @@ class HttpServer::Impl
 
     const AppConfig& config_;
     StructuredLogger& logger_;
+    std::shared_ptr<detail::RequestIds> request_ids_;
     tcp::acceptor acceptor_;
     asio::steady_timer accept_retry_timer_;
     asio::steady_timer drain_timer_;

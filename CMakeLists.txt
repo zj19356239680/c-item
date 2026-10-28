@@ -61,6 +61,7 @@ add_library(apigate_core
     src/rate_limit.cpp
     src/route_proxy_admission.cpp
     src/upstream_tls.cpp
+    src/request_id.cpp
     src/logging.cpp)
 target_include_directories(apigate_core PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -92,6 +93,7 @@ if(BUILD_TESTING)
         tests/unit/http_server_test.cpp
         tests/unit/rate_limit_test.cpp
         tests/unit/route_proxy_admission_test.cpp
+        tests/unit/request_id_test.cpp
         tests/unit/logging_test.cpp)
     target_include_directories(apigate_unit_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(apigate_unit_tests PRIVATE apigate_core GTest::gtest_main)

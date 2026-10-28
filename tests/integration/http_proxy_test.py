@@ -52,6 +52,7 @@ class UpstreamState:
             self._request_count += 1
         self.requests.put(
             {
+                "request_ids": handler.headers.get_all("X-Request-ID", []),
                 "method": handler.command,
                 "path": handler.path,
                 "body": body,
@@ -741,6 +742,7 @@ def test_proxy_capacity_rejects_without_visiting_upstream(binary):
         assert upstream.state.request_count() == 1
 
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        rejected_ids = []
         for method in ("POST", "PUT", "PATCH"):
             rejected, rejected_body = read_json_response(
                 connection,
@@ -754,6 +756,9 @@ def test_proxy_capacity_rejects_without_visiting_upstream(binary):
                 },
             )
             assert rejected.status == 503
+            request_id = rejected.getheader("X-Request-ID")
+            assert request_id is not None and len(request_id) == 49 and request_id not in rejected_ids
+            rejected_ids.append(request_id)
             assert rejected_body == {
                 "error": {
                     "code": "gateway_overloaded",
@@ -799,8 +804,10 @@ def test_proxy_capacity_rejects_without_visiting_upstream(binary):
                 "active_proxies": 1,
                 "max_proxies": 1,
                 "status": 503,
+                "request_id": request_id,
             }
-        ] * 3
+            for request_id in rejected_ids
+        ]
         completed_503 = [
             record
             for record in records

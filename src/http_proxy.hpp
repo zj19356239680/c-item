@@ -107,8 +107,8 @@ void run_proxy_completion_action(ProxyCompletionState& state, CompletionAction&&
 
 [[nodiscard]] std::string make_upstream_authority(std::string_view host, std::uint16_t port);
 [[nodiscard]] HttpRequest make_upstream_request(const SelectedUpstream& selected,
-                                                const HttpRequest& request,
-                                                bool keep_alive = false);
+                                                const HttpRequest& request, bool keep_alive = false,
+                                                std::string_view request_id = {});
 [[nodiscard]] HttpResponse make_downstream_response(const HttpRequest& request,
                                                     HttpResponse upstream_response);
 
@@ -137,7 +137,7 @@ class HttpProxyExchange : public std::enable_shared_from_this<HttpProxyExchange>
                       std::shared_ptr<detail::BufferBudgetPermit> request_body_permit,
                       CompletionCallback on_complete, AbortCallback on_abort,
                       std::shared_ptr<detail::UpstreamPool> pool = nullptr,
-                      StreamCallbacks streaming = {});
+                      StreamCallbacks streaming = {}, std::string_view request_id = {});
     ~HttpProxyExchange();
 
     HttpProxyExchange(const HttpProxyExchange&) = delete;

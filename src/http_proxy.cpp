@@ -19,6 +19,7 @@
 #include <string>
 #include <utility>
 
+#include "request_id.hpp"
 #include "upstream_pool.hpp"
 #include "upstream_tls.hpp"
 
@@ -165,7 +166,7 @@ std::string make_upstream_authority(std::string_view host, std::uint16_t port)
 }
 
 HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRequest& request,
-                                  bool keep_alive)
+                                  bool keep_alive, std::string_view request_id)
 {
     const auto& config = selected.upstream;
     std::string_view target{request.target().data(), request.target().size()};
@@ -186,7 +187,8 @@ HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRe
     for (const auto& field : request.base())
     {
         const std::string_view name{field.name_string().data(), field.name_string().size()};
-        if ((selected.strip_authorization && field.name() == http::field::authorization) ||
+        if (beast::iequals(field.name_string(), "X-Request-ID") ||
+            (selected.strip_authorization && field.name() == http::field::authorization) ||
             is_hop_by_hop(name, dynamic_tokens) || is_forwarding_metadata(name) ||
             field.name() == http::field::host || field.name() == http::field::content_length ||
             field.name() == http::field::expect)
@@ -195,6 +197,7 @@ HttpRequest make_upstream_request(const SelectedUpstream& selected, const HttpRe
         }
         upstream.insert(field.name_string(), field.value());
     }
+    detail::set_request_id(upstream.base(), request_id);
     upstream.set(http::field::host, make_upstream_authority(config.host, config.port));
     upstream.keep_alive(keep_alive);
     upstream.body() = request.body();
@@ -260,14 +263,16 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
          std::shared_ptr<detail::BufferBudgetState> buffer_budget,
          std::shared_ptr<detail::BufferBudgetPermit> request_body_permit,
          CompletionCallback on_complete, AbortCallback on_abort,
-         std::shared_ptr<detail::UpstreamPool> pool, StreamCallbacks streaming)
+         std::shared_ptr<detail::UpstreamPool> pool, StreamCallbacks streaming,
+         std::string_view request_id)
         : tls_context_(std::move(tls_context)),
           resolver_(executor),
           pool_(std::move(pool)),
           deadline_(executor),
           config_(selected.upstream),
           downstream_request_(request),
-          upstream_request_(detail::make_upstream_request(selected, request, pool_ != nullptr)),
+          upstream_request_(
+              detail::make_upstream_request(selected, request, pool_ != nullptr, request_id)),
           buffer_budget_(std::move(buffer_budget)),
           request_body_permit_(std::move(request_body_permit)),
           streaming_(std::move(streaming)),
@@ -995,14 +1000,15 @@ HttpProxyExchange::HttpProxyExchange(
     const HttpRequest& request, std::shared_ptr<UpstreamTlsContext> tls_context,
     std::shared_ptr<detail::BufferBudgetState> buffer_budget,
     std::shared_ptr<detail::BufferBudgetPermit> request_body_permit, CompletionCallback on_complete,
-    AbortCallback on_abort, std::shared_ptr<detail::UpstreamPool> pool, StreamCallbacks streaming)
+    AbortCallback on_abort, std::shared_ptr<detail::UpstreamPool> pool, StreamCallbacks streaming,
+    std::string_view request_id)
     // Boost.Asio's resolver service calls its final shutdown hook during service destruction;
     // the analyzer reports this library-owned, non-polymorphic cleanup as virtual dispatch.
     // NOLINTNEXTLINE(clang-analyzer-optin.cplusplus.VirtualCall)
     : impl_(std::make_shared<Impl>(executor, selected, request, std::move(tls_context),
                                    std::move(buffer_budget), std::move(request_body_permit),
                                    std::move(on_complete), std::move(on_abort), std::move(pool),
-                                   std::move(streaming)))
+                                   std::move(streaming), request_id))
 {
 }
 

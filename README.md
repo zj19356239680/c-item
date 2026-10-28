@@ -673,3 +673,22 @@ bash scripts/container-smoke.sh
   `APIGATE_DOCKER_BUILD_NETWORK=host bash scripts/container-smoke.sh`。
 
 架构、取舍、停止行为和测试覆盖见[设计文档](设计文档.md)。
+
+### 请求 ID
+
+完整读取并进入 HTTP 处理链后，网关为每个请求生成 X-Request-ID：32 位十六进制进程随机
+前缀、连字符及 16 位十六进制单调序号（共 49 个 ASCII 字符）。同一 keep-alive 连接的各
+请求使用不同 ID。随机前缀使用 OpenSSL RAND_bytes，在监听前检查失败；序号耗尽直接
+失败关闭当前及后续请求，需重启恢复，绝不回绕复用。跨进程唯一性依赖随机前缀的碰撞概率，不是集中式唯一服务。
+
+用 curl -i 查看响应 X-Request-ID，再在 JSON 日志中按 request_id 查找；后端收到的同名
+头与响应和网关请求日志相同，可据此关联后端日志。网关覆盖客户端全部同名头（包括被
+Connection 提名的字段），上游返回的同名头也不能覆盖网关 ID。ID 不从 URL、凭据或正文派生。
+
+本地端点、metrics、HEAD、缓冲/流式代理及处理链内的安全错误均携带 ID；HEAD 仍无正文。
+流式头和晚期失败日志使用同一 ID。ID 不进入指标标签，也不附加到无关全局事件。
+未完整读取时的解析错误、读取超时、TLS 握手失败不在本轮覆盖范围；读取下一请求前清理旧 ID。
+ID 不是认证凭据、不授予权限，也不是完整分布式追踪；不实现 traceparent 或 OpenTelemetry。
+
+服务器拥有共享生成器，session 持有本次 ID 字符串；代理构造时仅把短 ID 复制入上游头，
+不借用可复用 session 状态，也不额外复制请求正文。异步回调沿用已有对象所有权和取消规则。
