@@ -227,12 +227,24 @@ HttpResponse make_downstream_header(const HttpRequest& request,
     }
     response.set(http::field::server, "ApiGate");
     response.keep_alive(request.keep_alive());
+    if (request.method() == http::verb::head)
+    {
+        const auto length = upstream_response[http::field::content_length];
+        if (!length.empty())
+        {
+            response.set(http::field::content_length, length);
+        }
+    }
     return response;
 }
 
 HttpResponse make_downstream_response(const HttpRequest& request, HttpResponse upstream_response)
 {
     auto response = make_downstream_header(request, upstream_response.base());
+    if (request.method() == http::verb::head)
+    {
+        return response;
+    }
     response.body() = std::move(upstream_response.body());
     response.prepare_payload();
     return response;
@@ -293,6 +305,11 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
         {
             connection_ =
                 std::make_unique<detail::UpstreamConnection>(executor, config_, tls_context_);
+        }
+        response_parser_.skip(request.method() == http::verb::head);
+        if (stream_parser_)
+        {
+            stream_parser_->skip(request.method() == http::verb::head);
         }
         response_parser_.body_limit(max_upstream_body_bytes);
         response_parser_.header_limit(max_upstream_header_bytes);
@@ -639,7 +656,8 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
             return;
         }
         const auto length = parser.content_length();
-        if (length && *length > max_upstream_body_bytes)
+        if (downstream_request_.method() != http::verb::head && length &&
+            *length > max_upstream_body_bytes)
         {
             fail(ProxyFailureStage::response_too_large, http::error::body_limit);
             return;
@@ -674,7 +692,8 @@ class HttpProxyExchange::Impl : public std::enable_shared_from_this<HttpProxyExc
                 header.keep_alive(false);
             }
         }
-        else if (original.result() != http::status::no_content &&
+        else if (downstream_request_.method() != http::verb::head &&
+                 original.result() != http::status::no_content &&
                  original.result() != http::status::not_modified)
         {
             header.content_length(0);

@@ -37,7 +37,7 @@ class DownstreamTransport
     void async_read_header(boost::beast::flat_buffer& buffer, Parser& parser,
                            Completion completion);
     void async_read(boost::beast::flat_buffer& buffer, Parser& parser, Completion completion);
-    void async_write(HttpResponse& response, Completion completion);
+    void async_write(HttpResponse& response, Completion completion, bool header_only = false);
     void async_stream_header(std::shared_ptr<StreamWriter> writer, Completion completion);
     void async_stream_body(std::shared_ptr<StreamWriter> writer, std::shared_ptr<StreamBlock> block,
                            std::size_t bytes, bool final, Completion completion);

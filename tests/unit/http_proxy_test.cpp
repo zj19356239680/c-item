@@ -286,4 +286,14 @@ TEST(HttpProxyTest, CompletionExceptionAbortsOnlyOnce)
     EXPECT_EQ(abort_count, 1U);
 }
 
+TEST(HttpProxyTest, HeadPreservesResourceLengthWithoutResponseBody)
+{
+    apigate::HttpRequest request{http::verb::head, "/resource", 11};
+    apigate::HttpResponse upstream{http::status::ok, 11};
+    upstream.content_length(2097152);
+    const auto response = apigate::detail::make_downstream_response(request, std::move(upstream));
+    EXPECT_TRUE(response.body().empty());
+    EXPECT_EQ(response[http::field::content_length], "2097152");
+}
+
 }  // namespace

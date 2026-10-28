@@ -115,7 +115,7 @@ TEST(HttpHandlerTest, ProxiesSupportedMethodsOnUnmatchedRoutes)
     EXPECT_FALSE(apigate::should_proxy_http_request(apigate::AppConfig{},
                                                     make_request(http::verb::get, "/resource")));
     EXPECT_FALSE(
-        apigate::should_proxy_http_request(config, make_request(http::verb::delete_, "/resource")));
+        apigate::should_proxy_http_request(config, make_request(http::verb::trace, "/resource")));
 
     proxy_request.body() = "not-forwarded";
     proxy_request.prepare_payload();
@@ -154,14 +154,13 @@ TEST(HttpHandlerTest, KeepsLocalRoutesGetOnlyWhenProxyIsEnabled)
 TEST(HttpHandlerTest, RejectsMethodsOutsideTheProxyMvp)
 {
     const auto config = proxy_config();
-    for (const auto method :
-         {http::verb::head, http::verb::delete_, http::verb::options, http::verb::connect})
+    for (const auto method : {http::verb::trace, http::verb::connect})
     {
         const auto request = make_request(method, "/resource");
         EXPECT_FALSE(apigate::should_proxy_http_request(config, request));
         const auto response = apigate::handle_http_request(config, request);
         EXPECT_EQ(response.result(), http::status::method_not_allowed);
-        EXPECT_EQ(response[http::field::allow], "GET, POST, PUT, PATCH");
+        EXPECT_EQ(response[http::field::allow], "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS");
     }
 }
 
@@ -315,7 +314,7 @@ TEST(HttpHandlerTest, RouteModeMissesStayLocalAndProtocolErrorsStayConsistent)
         EXPECT_EQ(apigate::handle_http_request(config, request).result(),
                   http::status::bad_request);
     }
-    for (const auto method : {http::verb::head, http::verb::delete_, http::verb::options})
+    for (const auto method : {http::verb::trace, http::verb::connect})
     {
         const auto request = make_request(method, "/users");
         EXPECT_FALSE(apigate::select_http_route(config, request).has_value());
@@ -336,6 +335,26 @@ TEST(HttpHandlerTest, RouteModeMissesStayLocalAndProtocolErrorsStayConsistent)
     {
         FAIL() << "legacy fixture requires an upstream";
     }
+}
+
+TEST(HttpHandlerTest, NewProxyMethodsRespectLocalEndpointsAndHeadErrorsHaveNoBody)
+{
+    const auto config = proxy_config();
+    for (const auto method : {http::verb::head, http::verb::delete_, http::verb::options})
+    {
+        EXPECT_TRUE(apigate::should_proxy_http_request(config, make_request(method, "/item")));
+        const auto local = apigate::handle_http_request(config, make_request(method, "/healthz"));
+        EXPECT_EQ(local.result_int(), 405U);
+        EXPECT_EQ(local[http::field::allow], "GET");
+    }
+    auto request = make_request(http::verb::head, "/item");
+    EXPECT_TRUE(apigate::make_gateway_error_response(request, apigate::GatewayFailure::bad_gateway)
+                    .body()
+                    .empty());
+    EXPECT_TRUE(apigate::make_authentication_failed_response(request).body().empty());
+    request.body() = "forbidden";
+    EXPECT_FALSE(apigate::should_proxy_http_request(config, request));
+    EXPECT_EQ(apigate::handle_http_request(config, request).result_int(), 400U);
 }
 
 }  // namespace

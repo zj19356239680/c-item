@@ -102,11 +102,24 @@ void DownstreamTransport::async_read(beast::flat_buffer& buffer, Parser& parser,
                              });
         });
 }
-void DownstreamTransport::async_write(HttpResponse& response, Completion completion)
+void DownstreamTransport::async_write(HttpResponse& response, Completion completion,
+                                      bool header_only)
 {
     impl_->with_stream(
         [&](auto& stream)
         {
+            if (header_only)
+            {
+                auto serializer =
+                    std::make_shared<http::response_serializer<http::string_body>>(response);
+                http::async_write_header(stream, *serializer,
+                                         [serializer, completion = std::move(completion)](
+                                             const boost::system::error_code& error, std::size_t)
+                                         {
+                                             completion(error);
+                                         });
+                return;
+            }
             http::async_write(stream, response,
                               [completion = std::move(completion)](
                                   const boost::system::error_code& error, std::size_t)

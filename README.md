@@ -2,7 +2,7 @@
 
 ApiGate 是一个用于学习和逐步开发 API 网关的 C++20 项目。当前版本提供异步
 HTTP/1.1 健康检查、配置校验、JSON 日志，以及可选的路径路由与多个静态 HTTP/HTTPS 上游。
-代理支持 GET 及有界正文的 POST、PUT、PATCH、同一路由多实例轮询，以及可选主动健康检查与故障摘除。支持默认关闭的 HTTP/HTTPS 上游连接池和按静态路由开启的流式响应。它没有流式上传、重试、
+代理支持 GET、HEAD 及有界正文的 POST、PUT、PATCH、DELETE、OPTIONS、同一路由多实例轮询，以及可选主动健康检查与故障摘除。支持默认关闭的 HTTP/HTTPS 上游连接池和按静态路由开启的流式响应。它没有流式上传、重试、
 缓存、每客户端或分布式限流、用户账号/角色授权或 HTTP/2；支持可选下游 TLS 和路由级 API Key 认证。按路由限流不构成生产容量保证。
 不要把它当作生产网关。本项目在 Linux 环境下开发，
 仅支持 Linux 构建与运行。
@@ -60,7 +60,7 @@ curl -fsS http://127.0.0.1:8080/readyz
 | `POST /healthz` | 405 | `{"error":{"code":"method_not_allowed","message":"only GET is supported"}}`；`Allow: GET` |
 
 表中服务名使用默认配置。路由匹配时忽略查询字符串；本地端点只接受 `GET`，代理关闭
-时 POST、PUT、PATCH 也继续返回 405。正常响应设置 `Server: ApiGate`、
+时 POST、PUT、PATCH、DELETE、OPTIONS 也继续返回 405。正常响应设置 `Server: ApiGate`、
 `Content-Type: application/json` 和 `Cache-Control: no-store`；
 正文长度及连接头由 HTTP 库按请求生成。请求头超过 8 KiB 返回 431，正文超过
 64 KiB 返回 413；格式错误请求可能返回 400 或直接断开。一次请求的头部和正文共享
@@ -70,10 +70,9 @@ curl -fsS http://127.0.0.1:8080/readyz
 API 兼容承诺，具体设计边界见[设计文档](设计文档.md)。
 
 同时设置 `APIGATE_UPSTREAM_HOST` 和 `APIGATE_UPSTREAM_PORT` 后，除
-`/healthz`、`/readyz` 外的 origin-form GET、POST、PUT、PATCH 会代理到该 HTTP 上游，
-原始方法、路径和查询保持不变。GET 只允许空正文；POST、PUT、PATCH 允许空正文或最多
-64 KiB 的正文。absolute-form、Upgrade 或带正文 GET 返回安全的 400 JSON，HEAD、
-DELETE、OPTIONS、CONNECT 及其他方法返回 405。上游解析、连接、写入、读取、协议错误
+`/healthz`、`/readyz` 外的 origin-form GET、HEAD、POST、PUT、PATCH、DELETE、OPTIONS 会代理到该 HTTP 上游，
+原始方法、路径和查询保持不变。GET、HEAD 只允许空正文；POST、PUT、PATCH、DELETE、OPTIONS 允许空正文或最多
+64 KiB 的正文。absolute-form、Upgrade 或带正文 GET 返回安全的 400 JSON，CONNECT、TRACE 及其他未支持方法返回 405。上游解析、连接、写入、读取、协议错误
 或响应超限返回 502，任一上游阶段超时返回 504；上游 1xx 信息响应（包括 101）也会被
 拒绝为 502，不继续读取后续响应或切换协议。错误正文不会包含上游地址、请求目标或
 系统错误文本。下游 Content-Length 与 chunked 正文都会先完整缓冲并按解析后的有效
@@ -85,6 +84,13 @@ DELETE、OPTIONS、CONNECT 及其他方法返回 405。上游解析、连接、�
 立即返回 503 和
 `{"error":{"code":"gateway_overloaded","message":"proxy capacity is exhausted"}}`；
 响应不设置 `Retry-After`，本地健康端点不占用代理名额。
+
+HEAD 代理在读取上游响应头前设置 Beast skip(true)，不等待正文，也不按资源长度申请正文预算。
+缓冲和流式路径均只发送下游响应头，允许保留超过 1 MiB 的 Content-Length 资源元数据；
+安全错误响应也不发送正文或终止 chunk。连接仅按原有完整解析及清洁检查规则归池，不清空额外数据。
+HEAD 与 GET 均不接受非空请求正文。DELETE、OPTIONS 正文仍受 64 KiB 及全局预算限制。
+OPTIONS 由后端决定响应，不自动生成 OPTIONS、CORS 或预检放行，受保护路由仍须认证。
+本地 /healthz、/readyz、启用的 /metrics 仍只允许 GET。以上方法不增加重试或改变选路和准入顺序。
 
 `APIGATE_MAX_IN_FLIGHT_BYTES` 是进程内所有 session 和代理交换共享的**缓冲正文逻辑
 预约预算**。已知 `Content-Length` 的下游请求按长度预约，chunked 或未知长度请求按

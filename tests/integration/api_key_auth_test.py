@@ -11,7 +11,7 @@ import tempfile
 
 from downstream_tls_test import start, context, logs, run
 from https_proxy_test import certificate_files
-from upstream_pool_test import PoolBackend
+from upstream_pool_test import PoolBackend, PoolHandler
 from http_proxy_test import stop_service
 from http_server_test import read_json_response, build_test_environment
 from metrics_test import scrape, failures, rejection, response_count
@@ -309,11 +309,87 @@ def test_legacy_forwarding(binary, root):
         logs(service, {"legacy header": marker})
 
 
+class MethodHandler(PoolHandler):
+    def do_DELETE(self):
+        self._handle_request()
+
+    def do_OPTIONS(self):
+        self._handle_request()
+
+    def do_HEAD(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.server.state.record(self, body)
+        self.send_response(200)
+        self.send_header("Content-Length", "2097152")
+        self.end_headers()
+
+
+def test_methods(binary, root, key):
+    for mode in ("legacy", "buffered", "stream"):
+        with ExitStack() as resources:
+            backend = PoolBackend(resources)
+            backend.RequestHandlerClass = MethodHandler
+            environment = {"APIGATE_UPSTREAM_KEEP_ALIVE": "true", "APIGATE_MAX_IN_FLIGHT_BYTES": "128"}
+            if mode == "legacy":
+                environment.update(APIGATE_UPSTREAM_HOST="127.0.0.1", APIGATE_UPSTREAM_PORT=str(backend.port))
+            else:
+                environment["APIGATE_ROUTES"] = json.dumps([{"prefix": "/api", "strip_prefix": True,
+                    "host": "127.0.0.1", "port": backend.port, "stream_response": mode == "stream",
+                    "auth": {"api_key_env": AUTH_A}}])
+                environment[AUTH_A] = key
+            service, _, client = start(resources, binary, root, **environment)
+            connection = client()
+            connection.connect()
+            original_socket = connection.sock
+            target = "/item?raw=%2f" if mode == "legacy" else "/api/item?raw=%2f"
+            headers = {"Authorization": "Bearer " + key} if mode != "legacy" else {}
+            for method in ("DELETE", "OPTIONS", "HEAD"):
+                if mode != "legacy":
+                    before = backend.state.request_count()
+                    connection.request(method, target)
+                    response = connection.getresponse()
+                    assert response.status == 401
+                    data = response.read()
+                    if method == "HEAD":
+                        assert data == b""
+                    assert backend.state.request_count() == before
+                body = None if method == "HEAD" else b"bounded-method-body"
+                connection.request(method, target, body, headers)
+                response = connection.getresponse()
+                assert response.status == 200
+                assert response.read() == (b"" if method == "HEAD" else b"ok")
+                assert connection.sock is original_socket
+                if method == "HEAD":
+                    assert response.getheader("Content-Length") == "2097152"
+                received = backend.state.requests.get(timeout=2)
+                assert received["method"] == method and received["path"] == "/item?raw=%2f"
+                assert received["body"] == (body or b"")
+                assert received["host"] == f"127.0.0.1:{backend.port}"
+                if mode != "legacy":
+                    assert received["authorization"] is None
+            connection.request("GET", target, headers=headers)
+            assert connection.getresponse().read() == b"ok"
+            assert backend.accepts == 1
+            assert connection.sock is original_socket
+            backend.state.requests.get(timeout=2)
+            for method in ("DELETE", "OPTIONS"):
+                before = backend.state.request_count()
+                connection.request(method, target, b"x" * 65537, headers)
+                response = connection.getresponse()
+                assert response.status == 413
+                response.read()
+                assert backend.state.request_count() == before
+            stop_service(service)
+            logs(service, {"test key": key})
+    print("DELETE/OPTIONS/HEAD: forwarding, protected auth, HEAD 2 MiB metadata, pooled keep-alive and size rejection passed")
+
+
 def main():
     binary = os.path.abspath(sys.argv[1])
     key_a, key_b = secrets.token_hex(32), secrets.token_hex(32)
     with tempfile.TemporaryDirectory(prefix="apigate-auth-tls-") as directory:
         root = certificate_files(directory)
+        test_methods(binary, root, key_a)
         test_config(binary, root, key_a)
         extra_keys = {AUTH_A: key_a, AUTH_B: key_b,
                       "APIGATE_AUTH_KEY_TEST_C": secrets.token_hex(32),

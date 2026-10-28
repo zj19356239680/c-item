@@ -348,10 +348,10 @@ def test_proxy_success_and_security(binary):
         assert upgrade.status == 400
         assert upgrade_error["error"]["code"] == "unsupported_request"
         unsupported, unsupported_error = read_json_response(
-            connection, "DELETE", "/resource"
+            connection, "TRACE", "/resource"
         )
         assert unsupported.status == 405
-        assert unsupported.getheader("Allow") == "GET, POST, PUT, PATCH"
+        assert unsupported.getheader("Allow") == "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS"
         assert unsupported_error["error"]["code"] == "method_not_allowed"
         assert upstream.state.request_count() == 1
 

@@ -104,7 +104,7 @@ def test_route_rate_limits(binary):
         healthy()
         # Invalid requests must not consume any of the first two tokens.
         for method, path, body, status in (
-            ("DELETE", "/limited", None, 405), ("GET", "/limited", b"invalid-body", 400),
+            ("TRACE", "/limited", None, 405), ("GET", "/limited", b"invalid-body", 400),
             ("POST", "/missing", None, 404),
         ):
             response, _ = read_json_response(client, method, path, body=body)

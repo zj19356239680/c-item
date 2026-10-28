@@ -31,7 +31,8 @@ namespace http = boost::beast::http;
 [[nodiscard]] bool is_supported_proxy_method(http::verb method) noexcept
 {
     return method == http::verb::get || method == http::verb::post || method == http::verb::put ||
-           method == http::verb::patch;
+           method == http::verb::patch || method == http::verb::delete_ ||
+           method == http::verb::head || method == http::verb::options;
 }
 
 [[nodiscard]] HttpResponse make_json_response(const HttpRequest& request, http::status status,
@@ -44,12 +45,17 @@ namespace http = boost::beast::http;
     response.keep_alive(request.keep_alive());
     response.body() = body.dump();
     response.prepare_payload();
+    if (request.method() == http::verb::head)
+    {
+        response.body().clear();
+    }
     return response;
 }
 
 [[nodiscard]] HttpResponse make_method_not_allowed(const HttpRequest& request, bool proxy_enabled)
 {
-    const std::string_view allowed = proxy_enabled ? "GET, POST, PUT, PATCH" : "GET";
+    const std::string_view allowed =
+        proxy_enabled ? "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS" : "GET";
     const std::string_view message =
         proxy_enabled ? "method is not supported" : "only GET is supported";
     auto response =
@@ -94,6 +100,10 @@ HttpResponse make_metrics_response(const HttpRequest& request, std::string body)
     response.keep_alive(request.keep_alive());
     response.body() = std::move(body);
     response.prepare_payload();
+    if (request.method() == http::verb::head)
+    {
+        response.body().clear();
+    }
     return response;
 }
 
@@ -110,7 +120,8 @@ std::optional<SelectedRoute> select_http_route(const AppConfig& config,
         return std::nullopt;
     }
     if (!is_supported_proxy_target(target) || requests_upgrade(request) ||
-        (request.method() == http::verb::get && !request.body().empty()))
+        ((request.method() == http::verb::get || request.method() == http::verb::head) &&
+         !request.body().empty()))
     {
         return std::nullopt;
     }
@@ -191,8 +202,10 @@ HttpResponse handle_http_request(const AppConfig& config, const HttpRequest& req
     {
         return make_method_not_allowed(request, false);
     }
-    if (proxy_enabled && (!is_supported_proxy_target(target) ||
-                          (request.method() == http::verb::get && !request.body().empty())))
+    if (proxy_enabled &&
+        (!is_supported_proxy_target(target) ||
+         ((request.method() == http::verb::get || request.method() == http::verb::head) &&
+          !request.body().empty())))
     {
         return make_json_response(
             request, http::status::bad_request,

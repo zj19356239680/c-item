@@ -352,6 +352,12 @@ constexpr auto accept_retry_delay = std::chrono::milliseconds{100};
             return "PUT";
         case http::verb::patch:
             return "PATCH";
+        case http::verb::delete_:
+            return "DELETE";
+        case http::verb::head:
+            return "HEAD";
+        case http::verb::options:
+            return "OPTIONS";
         default:
             return "UNKNOWN";
     }
@@ -537,6 +543,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
     {
         if (parser_)
         {
+            head_response_ = parser_->get().method() == http::verb::head;
             observation_.exclude(is_metrics_target(config_, parser_->get().target()));
         }
         if (finished_)
@@ -902,7 +909,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         {
             header.keep_alive(false);
         }
-        stream_close_ = header.need_eof();
+        stream_close_ = head_response_ ? !header.keep_alive() : header.need_eof();
         stream_status_ = header.result_int();
         static_cast<void>(observation_.finish(metrics_.get(), stream_status_,
                                               detail::RequestObservation::Clock::now()));
@@ -1104,20 +1111,23 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
         {
             response.keep_alive(false);
         }
-        const bool close_after_write = response.need_eof();
+        const bool close_after_write =
+            head_response_ ? !response.keep_alive() : response.need_eof();
         response_.emplace(std::move(response));
         response_body_permit_ = std::move(body_permit);
         stream_.expires_after(request_timeout);
-        stream_.async_write(*response_,
-                            [self = shared_from_this(),
-                             close_after_write](const boost::system::error_code& error) noexcept
-                            {
-                                self->run_handler(
-                                    [self, close_after_write, &error]
-                                    {
-                                        self->on_write(error, close_after_write);
-                                    });
-                            });
+        stream_.async_write(
+            *response_,
+            [self = shared_from_this(),
+             close_after_write](const boost::system::error_code& error) noexcept
+            {
+                self->run_handler(
+                    [self, close_after_write, &error]
+                    {
+                        self->on_write(error, close_after_write);
+                    });
+            },
+            head_response_);
     }
 
     template <typename HandlerAction>
@@ -1289,6 +1299,7 @@ class HttpSession : public std::enable_shared_from_this<HttpSession>
     std::string remote_address_;
     std::size_t requests_served_{0};
     detail::SessionPhase phase_{detail::SessionPhase::reading};
+    bool head_response_{false};
     bool tls_established_{false};
     bool draining_{false};
     bool stopping_{false};
