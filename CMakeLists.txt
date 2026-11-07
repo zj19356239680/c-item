@@ -122,6 +122,10 @@ if(BUILD_TESTING)
     add_test(NAME integration.container_smoke_safety
         COMMAND bash ${PROJECT_SOURCE_DIR}/tests/integration/container_smoke_safety.sh)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME integration.demo_smoke
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/demo_test.py
+                $<TARGET_FILE:api-gate>)
+    set_tests_properties(integration.demo_smoke PROPERTIES TIMEOUT 60)
     add_test(NAME integration.build_parallelism
         COMMAND ${Python3_EXECUTABLE}
                 ${PROJECT_SOURCE_DIR}/tests/integration/build_parallelism_test.py)
